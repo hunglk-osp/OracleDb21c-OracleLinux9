@@ -778,4 +778,3 @@
           - "{{ db_username }}/{{ db_user_password }}@{{ server_ip }}:{{ listener_port }}/{{ pdb_name | lower }}"
           - ""
       tags: [always]
-ENDPLAYBOOK
