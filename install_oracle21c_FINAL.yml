@@ -1,6 +1,6 @@
 # install_oracle21c_FINAL.yml
 # Oracle Database 21c on Oracle Linux 9 - FINAL VERSION
-# All bugs fixed, production ready
+# Bug fixed: DBCA condition now checks for ORA errors properly
 ---
 - name: Install Oracle Database 21c on Oracle Linux 9
   hosts: localhost
@@ -507,6 +507,15 @@
       changed_when: false
       tags: [database]
 
+    - name: "STEP 5.4: Debug DB check result"
+      debug:
+        msg:
+          - "db_check.rc: {{ db_check.rc }}"
+          - "db_check.stdout: {{ db_check.stdout }}"
+          - "Contains ORA-: {{ 'ORA-' in db_check.stdout }}"
+          - "Contains ORCL: {{ 'ORCL' in db_check.stdout }}"
+      tags: [database]
+
     - name: "STEP 5.4: Create DB (15-30 min)"
       become_user: oracle
       shell: |
@@ -531,9 +540,12 @@
           -characterSet AL32UTF8 \
           -sysPassword {{ sys_password }} \
           -systemPassword {{ system_password }}
-      when:
-        - db_check.rc != 0
-        - "'ORCL' not in db_check.stdout"
+      when: >
+        db_check.rc != 0 or
+        'ORA-01034' in db_check.stdout or
+        'ORA-' in db_check.stdout or
+        'idle instance' in db_check.stdout.lower() or
+        'not available' in db_check.stdout.lower()
       async: 3600
       poll: 30
       tags: [database]
@@ -766,3 +778,4 @@
           - "{{ db_username }}/{{ db_user_password }}@{{ server_ip }}:{{ listener_port }}/{{ pdb_name | lower }}"
           - ""
       tags: [always]
+ENDPLAYBOOK
