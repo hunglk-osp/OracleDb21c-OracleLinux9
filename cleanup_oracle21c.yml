@@ -1,0 +1,300 @@
+# cleanup_oracle21c.yml
+# Clean Oracle Database 21c installation completely
+# Safe to run multiple times (idempotent)
+---
+- name: Cleanup Oracle Database 21c Installation
+  hosts: localhost
+  connection: local
+  become: yes
+  vars:
+    oracle_base: /u01/app/oracle
+    oracle_home: /u01/app/oracle/product/21c/dbhome_1
+    oracle_inventory: /u01/app/oraInventory
+    oracle_sid: ORCL
+    zip_file_remote: /tmp/LINUX.X64_213000_db_home.zip
+
+  tasks:
+    - name: "Display cleanup warning"
+      debug:
+        msg:
+          - "=========================================="
+          - "⚠️  WARNING: ORACLE CLEANUP"
+          - "=========================================="
+          - "This will REMOVE:"
+          - "  - Oracle Database instances"
+          - "  - Oracle software installation"
+          - "  - Oracle user and groups"
+          - "  - Systemd service"
+          - "  - Firewall rules"
+          - ""
+          - "This will KEEP:"
+          - "  - ZIP file: {{ zip_file_remote }}"
+          - ""
+      tags: [always]
+
+    - name: "Confirm cleanup"
+      pause:
+        prompt: "Type 'yes' to continue with cleanup (Ctrl+C to abort)"
+      register: cleanup_confirm
+      tags: [always]
+
+    - name: "Verify confirmation"
+      fail:
+        msg: "Cleanup aborted - must type 'yes' to continue"
+      when: cleanup_confirm.user_input != 'yes'
+      tags: [always]
+
+    # ==========================================
+    # STEP 1: Stop Services
+    # ==========================================
+    - name: "STEP 1.1: Stop oracle-db service"
+      systemd:
+        name: oracle-db
+        state: stopped
+      failed_when: false
+      tags: [cleanup, services]
+
+    - name: "STEP 1.2: Stop listener"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        lsnrctl stop
+      failed_when: false
+      when: ansible_facts.getent_passwd is defined and 'oracle' in ansible_facts.getent_passwd
+      tags: [cleanup, services]
+
+    - name: "STEP 1.3: Shutdown database"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SHUTDOWN IMMEDIATE;
+        EXIT;
+        EOF
+      failed_when: false
+      when: ansible_facts.getent_passwd is defined and 'oracle' in ansible_facts.getent_passwd
+      tags: [cleanup, services]
+
+    - name: "STEP 1.4: Kill all oracle processes"
+      shell: pkill -u oracle
+      failed_when: false
+      tags: [cleanup, services]
+
+    - name: "STEP 1.5: Wait for processes to terminate"
+      pause:
+        seconds: 5
+      tags: [cleanup, services]
+
+    # ==========================================
+    # STEP 2: Remove Systemd Service
+    # ==========================================
+    - name: "STEP 2.1: Disable oracle-db service"
+      systemd:
+        name: oracle-db
+        enabled: no
+      failed_when: false
+      tags: [cleanup, systemd]
+
+    - name: "STEP 2.2: Remove service file"
+      file:
+        path: /etc/systemd/system/oracle-db.service
+        state: absent
+      tags: [cleanup, systemd]
+
+    - name: "STEP 2.3: Reload systemd"
+      systemd:
+        daemon_reload: yes
+      tags: [cleanup, systemd]
+
+    # ==========================================
+    # STEP 3: Remove Firewall Rules
+    # ==========================================
+    - name: "STEP 3.1: Remove firewall rule"
+      firewalld:
+        port: 1521/tcp
+        permanent: yes
+        state: disabled
+        immediate: yes
+      failed_when: false
+      tags: [cleanup, firewall]
+
+    # ==========================================
+    # STEP 4: Remove Oracle Files
+    # ==========================================
+    - name: "STEP 4.1: Remove Oracle base"
+      file:
+        path: "{{ oracle_base }}"
+        state: absent
+      tags: [cleanup, files]
+
+    - name: "STEP 4.2: Remove Oracle inventory"
+      file:
+        path: "{{ oracle_inventory }}"
+        state: absent
+      tags: [cleanup, files]
+
+    - name: "STEP 4.3: Remove /u01 if empty"
+      shell: |
+        if [ -d /u01 ] && [ -z "$(ls -A /u01)" ]; then
+          rmdir /u01
+          echo "removed"
+        else
+          echo "not_empty_or_not_exists"
+        fi
+      register: u01_removal
+      changed_when: "'removed' in u01_removal.stdout"
+      tags: [cleanup, files]
+
+    # ==========================================
+    # STEP 5: Remove Oracle User & Groups
+    # ==========================================
+    - name: "STEP 5.1: Remove oracle user"
+      user:
+        name: oracle
+        state: absent
+        remove: yes
+        force: yes
+      tags: [cleanup, users]
+
+    - name: "STEP 5.2: Remove Oracle groups"
+      group:
+        name: "{{ item }}"
+        state: absent
+      loop:
+        - racdba
+        - kmdba
+        - dgdba
+        - backupdba
+        - oper
+        - dba
+        - oinstall
+      failed_when: false
+      tags: [cleanup, users]
+
+    # ==========================================
+    # STEP 6: Clean Configuration Files
+    # ==========================================
+    - name: "STEP 6.1: Remove /etc/oratab entries"
+      lineinfile:
+        path: /etc/oratab
+        regexp: "^{{ oracle_sid }}:"
+        state: absent
+      tags: [cleanup, config]
+
+    - name: "STEP 6.2: Remove Oracle env from root .bash_profile"
+      blockinfile:
+        path: /root/.bash_profile
+        marker: "# {mark} ANSIBLE MANAGED - Oracle"
+        state: absent
+      tags: [cleanup, config]
+
+    - name: "STEP 6.3: Remove hostname from /etc/hosts"
+      lineinfile:
+        path: /etc/hosts
+        regexp: ".*oracledb.*"
+        state: absent
+      tags: [cleanup, config]
+
+    # ==========================================
+    # STEP 7: Clean Temporary Files
+    # ==========================================
+    - name: "STEP 7.1: Remove temp files"
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/db_install.rsp
+        - /tmp/compat-openssl10.rpm
+        - /tmp/oracle-preinstall-21c.rpm
+        - /tmp/stat_wrap.c
+        - /tmp/stat_wrap.o
+      tags: [cleanup, temp]
+
+    - name: "STEP 7.2: Keep ZIP file"
+      debug:
+        msg: "Keeping ZIP file: {{ zip_file_remote }}"
+      when: ansible_facts.file is defined
+      tags: [cleanup, temp]
+
+    # ==========================================
+    # STEP 8: Clean Compatibility Fixes
+    # ==========================================
+    - name: "STEP 8.1: Remove dummy libpthread"
+      shell: |
+        if [ -f /usr/lib64/libpthread_nonshared.a ]; then
+          size=$(stat -c%s /usr/lib64/libpthread_nonshared.a)
+          if [ "$size" -eq 8 ]; then
+            rm -f /usr/lib64/libpthread_nonshared.a
+            echo "removed"
+          else
+            echo "not_dummy"
+          fi
+        else
+          echo "not_exists"
+        fi
+      register: libpthread_removal
+      changed_when: "'removed' in libpthread_removal.stdout"
+      tags: [cleanup, compat]
+
+    # ==========================================
+    # STEP 9: Optional Cleanup
+    # ==========================================
+    - name: "STEP 9.1: List remaining Oracle-related packages"
+      shell: rpm -qa | grep -i oracle
+      register: oracle_rpms
+      failed_when: false
+      changed_when: false
+      tags: [cleanup, optional]
+
+    - name: "STEP 9.2: Display remaining packages"
+      debug:
+        msg: "{{ oracle_rpms.stdout_lines }}"
+      when: oracle_rpms.stdout_lines | length > 0
+      tags: [cleanup, optional]
+
+    - name: "STEP 9.3: Ask to remove Oracle RPMs"
+      pause:
+        prompt: "Remove Oracle preinstall packages? (yes/no)"
+      register: remove_rpms_confirm
+      when: oracle_rpms.stdout_lines | length > 0
+      tags: [cleanup, optional]
+
+    - name: "STEP 9.4: Remove Oracle preinstall packages"
+      dnf:
+        name:
+          - oracle-database-preinstall-21c
+          - compat-openssl10
+        state: absent
+      when:
+        - oracle_rpms.stdout_lines | length > 0
+        - remove_rpms_confirm.user_input == 'yes'
+      tags: [cleanup, optional]
+
+    # ==========================================
+    # FINAL: Summary
+    # ==========================================
+    - name: "Cleanup Summary"
+      debug:
+        msg:
+          - "=========================================="
+          - "✅ ORACLE CLEANUP COMPLETE"
+          - "=========================================="
+          - ""
+          - "Removed:"
+          - "  ✓ Database instances"
+          - "  ✓ Oracle software"
+          - "  ✓ Oracle user & groups"
+          - "  ✓ Systemd service"
+          - "  ✓ Firewall rules"
+          - "  ✓ Configuration files"
+          - "  ✓ Temporary files"
+          - ""
+          - "Kept:"
+          - "  ✓ ZIP file: {{ zip_file_remote }}"
+          - ""
+          - "System is clean and ready for fresh install!"
+          - ""
+      tags: [always]
