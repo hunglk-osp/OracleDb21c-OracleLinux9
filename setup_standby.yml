@@ -1,0 +1,341 @@
+# setup_standby.yml
+# Cấu hình Data Guard - STANDBY (192.168.1.196)
+# Chạy trực tiếp trên server 196:
+#   ansible-playbook setup_standby.yml
+#
+# Yêu cầu: setup_primary.yml đã chạy xong trên server 195
+---
+- name: Setup Oracle Data Guard - Standby (192.168.1.196)
+  hosts: localhost
+  connection: local
+  become: yes
+  vars:
+    oracle_home: /u01/app/oracle/product/21c/dbhome_1
+    oracle_base: /u01/app/oracle
+    oracle_sid: ORCL
+    oracle_unique_name: ORCL
+    standby_unique_name: ORCL_STBY
+    primary_ip: 192.168.1.195
+    standby_ip: 192.168.1.196
+    listener_port: 1521
+    fra_dest: /u01/app/oracle/fast_recovery_area
+    fra_size: 20G
+    sys_password: "Oracle_4U"
+
+  tasks:
+
+    # ==========================================
+    # STEP 1: Verify password file đã được copy
+    # ==========================================
+    - name: "DG-S1: Check password file tồn tại"
+      stat:
+        path: "{{ oracle_home }}/dbs/orapw{{ oracle_sid }}"
+      register: pwdfile
+      tags: [prereq]
+
+    - name: "DG-S1: Assert password file exists"
+      assert:
+        that: pwdfile.stat.exists
+        fail_msg: >
+          Password file {{ oracle_home }}/dbs/orapw{{ oracle_sid }} không tồn tại!
+          Hãy chắc chắn setup_primary.yml đã chạy xong trên server 195.
+      tags: [prereq]
+
+    # ==========================================
+    # STEP 2: Tạo FRA directory
+    # ==========================================
+    - name: "DG-S2: Create FRA directory"
+      file:
+        path: "{{ fra_dest }}"
+        state: directory
+        owner: oracle
+        group: oinstall
+        mode: '0755'
+      tags: [fra]
+
+    # ==========================================
+    # STEP 3: Cấu hình tnsnames.ora
+    # ==========================================
+    - name: "DG-S3: Configure tnsnames.ora"
+      copy:
+        dest: "{{ oracle_home }}/network/admin/tnsnames.ora"
+        owner: oracle
+        group: oinstall
+        content: |
+          {{ oracle_unique_name }} =
+            (DESCRIPTION =
+              (ADDRESS = (PROTOCOL = TCP)(HOST = {{ primary_ip }})(PORT = {{ listener_port }}))
+              (CONNECT_DATA = (SERVICE_NAME = {{ oracle_sid }})))
+
+          {{ standby_unique_name }} =
+            (DESCRIPTION =
+              (ADDRESS = (PROTOCOL = TCP)(HOST = {{ standby_ip }})(PORT = {{ listener_port }}))
+              (CONNECT_DATA = (SERVICE_NAME = {{ oracle_sid }})))
+
+          ORCLPDB1 =
+            (DESCRIPTION =
+              (ADDRESS = (PROTOCOL = TCP)(HOST = {{ primary_ip }})(PORT = {{ listener_port }}))
+              (CONNECT_DATA = (SERVICE_NAME = ORCLPDB1)))
+      tags: [tns]
+
+    # ==========================================
+    # STEP 4: Cấu hình listener.ora
+    # ==========================================
+    - name: "DG-S4: Configure listener.ora"
+      copy:
+        dest: "{{ oracle_home }}/network/admin/listener.ora"
+        owner: oracle
+        group: oinstall
+        content: |
+          LISTENER =
+            (DESCRIPTION_LIST =
+              (DESCRIPTION =
+                (ADDRESS = (PROTOCOL = TCP)(HOST = {{ standby_ip }})(PORT = {{ listener_port }}))
+                (ADDRESS = (PROTOCOL = IPC)(KEY = EXTPROC1521))
+              )
+            )
+
+          SID_LIST_LISTENER =
+            (SID_LIST =
+              (SID_DESC =
+                (GLOBAL_DBNAME = {{ oracle_sid }})
+                (ORACLE_HOME = {{ oracle_home }})
+                (SID_NAME = {{ oracle_sid }})
+              )
+              (SID_DESC =
+                (GLOBAL_DBNAME = {{ standby_unique_name }}_DGMGRL)
+                (ORACLE_HOME = {{ oracle_home }})
+                (SID_NAME = {{ oracle_sid }})
+              )
+            )
+      tags: [listener]
+
+    - name: "DG-S4: Reload listener"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        lsnrctl reload
+      tags: [listener]
+
+    # ==========================================
+    # STEP 5: Tắt DB hiện tại, chuẩn bị cho RMAN duplicate
+    # ==========================================
+    - name: "DG-S5: Shutdown DB trên Standby"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'SQLEOF'
+        SHUTDOWN ABORT;
+        EXIT;
+        SQLEOF
+      failed_when: false
+      tags: [rman_prep]
+
+    - name: "DG-S5: Tạo pfile tạm cho NOMOUNT"
+      become_user: oracle
+      shell: |
+        cat > {{ oracle_home }}/dbs/init{{ oracle_sid }}_stby.ora << 'EOF'
+        db_name={{ oracle_sid }}
+        EOF
+      tags: [rman_prep]
+
+    - name: "DG-S5: Startup NOMOUNT trên Standby"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'SQLEOF'
+        STARTUP NOMOUNT PFILE='{{ oracle_home }}/dbs/init{{ oracle_sid }}_stby.ora';
+        EXIT;
+        SQLEOF
+      tags: [rman_prep]
+
+    - name: "DG-S5: Verify NOMOUNT status"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'SQLEOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF
+        SELECT STATUS FROM V$INSTANCE;
+        EXIT;
+        SQLEOF
+      register: nomount_check
+      changed_when: false
+      tags: [rman_prep]
+
+    - name: "DG-S5: Assert NOMOUNT"
+      assert:
+        that: "'STARTED' in nomount_check.stdout"
+        fail_msg: "DB không ở trạng thái NOMOUNT (STARTED)!"
+      tags: [rman_prep]
+
+    # ==========================================
+    # STEP 6: RMAN Duplicate từ Primary sang Standby
+    # Chạy từ Standby, connect đến Primary qua network
+    # ==========================================
+    - name: "DG-S6: Check RMAN duplicate đã thực hiện chưa"
+      stat:
+        path: "{{ oracle_base }}/oradata/{{ standby_unique_name }}"
+      register: rman_done
+      tags: [rman]
+
+    - name: "DG-S6: RMAN Duplicate (20-60 phút tùy DB size)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        rman << 'RMANEOF'
+        CONNECT TARGET sys/{{ sys_password }}@{{ oracle_unique_name }};
+        CONNECT AUXILIARY sys/{{ sys_password }}@{{ standby_unique_name }};
+        DUPLICATE TARGET DATABASE
+          FOR STANDBY
+          FROM ACTIVE DATABASE
+          DORECOVER
+          SPFILE
+            SET DB_UNIQUE_NAME='{{ standby_unique_name }}'
+            SET LOG_ARCHIVE_DEST_1='LOCATION=USE_DB_RECOVERY_FILE_DEST VALID_FOR=(ALL_LOGFILES,ALL_ROLES) DB_UNIQUE_NAME={{ standby_unique_name }}'
+            SET LOG_ARCHIVE_DEST_2='SERVICE={{ oracle_unique_name }} ASYNC VALID_FOR=(ONLINE_LOGFILES,PRIMARY_ROLE) DB_UNIQUE_NAME={{ oracle_unique_name }}'
+            SET LOG_ARCHIVE_DEST_STATE_1=ENABLE
+            SET LOG_ARCHIVE_DEST_STATE_2=ENABLE
+            SET LOG_ARCHIVE_CONFIG='DG_CONFIG=({{ oracle_unique_name }},{{ standby_unique_name }})'
+            SET FAL_SERVER='{{ oracle_unique_name }}'
+            SET FAL_CLIENT='{{ standby_unique_name }}'
+            SET STANDBY_FILE_MANAGEMENT='AUTO'
+            SET DB_RECOVERY_FILE_DEST='{{ fra_dest }}'
+            SET DB_RECOVERY_FILE_DEST_SIZE='{{ fra_size }}'
+            SET DG_BROKER_START='TRUE'
+          NOFILENAMECHECK;
+        EXIT;
+        RMANEOF
+      when: not rman_done.stat.exists
+      async: 7200
+      poll: 30
+      tags: [rman]
+
+    - name: "DG-S6: Verify Standby database role"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'SQLEOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF
+        SELECT DATABASE_ROLE, OPEN_MODE, DB_UNIQUE_NAME FROM V$DATABASE;
+        EXIT;
+        SQLEOF
+      register: standby_role
+      changed_when: false
+      tags: [rman]
+
+    - name: "DG-S6: Show Standby role"
+      debug:
+        msg: "{{ standby_role.stdout_lines }}"
+      tags: [rman]
+
+    # ==========================================
+    # STEP 7: Bật DG Broker và tạo configuration
+    # Chạy từ Standby sau khi RMAN xong
+    # ==========================================
+    - name: "DG-S7: Enable DG Broker trên Standby"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'SQLEOF'
+        ALTER SYSTEM SET DG_BROKER_START=TRUE SCOPE=BOTH;
+        EXIT;
+        SQLEOF
+      tags: [broker]
+
+    - name: "DG-S7: Tạo DG Broker configuration (chạy từ Primary qua TNS)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'DGEOF'
+        CREATE CONFIGURATION 'DG_{{ oracle_sid }}' AS
+          PRIMARY DATABASE IS '{{ oracle_unique_name }}'
+          CONNECT IDENTIFIER IS '{{ oracle_unique_name }}';
+        ADD DATABASE '{{ standby_unique_name }}'
+          AS CONNECT IDENTIFIER IS '{{ standby_unique_name }}'
+          MAINTAINED AS PHYSICAL;
+        ENABLE CONFIGURATION;
+        EXIT;
+        DGEOF
+      tags: [broker]
+
+    - name: "DG-S7: Chờ Broker khởi động"
+      pause:
+        seconds: 15
+      tags: [broker]
+
+    # ==========================================
+    # STEP 8: Validate cấu hình
+    # ==========================================
+    - name: "DG-S8: Show DG configuration"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'DGEOF'
+        SHOW CONFIGURATION;
+        SHOW DATABASE VERBOSE '{{ oracle_unique_name }}';
+        SHOW DATABASE VERBOSE '{{ standby_unique_name }}';
+        EXIT;
+        DGEOF
+      register: dg_config
+      changed_when: false
+      tags: [validate]
+
+    - name: "DG-S8: Show DG status"
+      debug:
+        msg: "{{ dg_config.stdout_lines }}"
+      tags: [validate]
+
+    - name: "DG-S8: Validate databases"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'DGEOF'
+        VALIDATE DATABASE '{{ oracle_unique_name }}';
+        VALIDATE DATABASE '{{ standby_unique_name }}';
+        EXIT;
+        DGEOF
+      register: dg_validate
+      changed_when: false
+      tags: [validate]
+
+    - name: "DG-S8: Show validate result"
+      debug:
+        msg: "{{ dg_validate.stdout_lines }}"
+      tags: [validate]
+
+    # ==========================================
+    # SUMMARY
+    # ==========================================
+    - name: "Standby setup hoàn tất"
+      debug:
+        msg:
+          - "============================================"
+          - "Data Guard STANDBY setup HOÀN TẤT"
+          - "============================================"
+          - "Primary  : {{ oracle_unique_name }} @ {{ primary_ip }}"
+          - "Standby  : {{ standby_unique_name }} @ {{ standby_ip }}"
+          - ""
+          - "Kiểm tra trạng thái:"
+          - "  dgmgrl sys/{{ sys_password }}@ORCL"
+          - "  SHOW CONFIGURATION;"
+          - ""
+          - "Thực hiện Switchover test:"
+          - "  SWITCHOVER TO '{{ standby_unique_name }}';"
+          - "============================================"
+      tags: [always]

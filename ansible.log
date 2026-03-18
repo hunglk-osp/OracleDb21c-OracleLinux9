@@ -1,0 +1,394 @@
+2026-03-18 09:16:53,216 p=2176 u=root n=ansible | PLAY [Install Oracle Database 21c on Oracle Linux 9] *************************************************************************************************
+2026-03-18 09:16:53,339 p=2176 u=root n=ansible | TASK [Gathering Facts] *******************************************************************************************************************************
+2026-03-18 09:16:55,591 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:16:55,606 p=2176 u=root n=ansible | TASK [Check Oracle Linux] ****************************************************************************************************************************
+2026-03-18 09:16:56,036 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:16:56,057 p=2176 u=root n=ansible | TASK [Get OL version] ********************************************************************************************************************************
+2026-03-18 09:16:56,744 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:16:56,750 p=2176 u=root n=ansible | TASK [Verify OL9] ************************************************************************************************************************************
+2026-03-18 09:16:56,766 p=2176 u=root n=ansible | ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+2026-03-18 09:16:56,779 p=2176 u=root n=ansible | TASK [Display resources] *****************************************************************************************************************************
+2026-03-18 09:16:56,796 p=2176 u=root n=ansible | ok: [localhost] => {
+    "msg": [
+        "RAM: 3462MB",
+        "Swap: 4039MB",
+        "CPU: 2"
+    ]
+}
+2026-03-18 09:16:56,801 p=2176 u=root n=ansible | TASK [Warn low RAM] **********************************************************************************************************************************
+2026-03-18 09:16:56,817 p=2176 u=root n=ansible | ok: [localhost] => {
+    "msg": "WARNING: RAM < 8GB"
+}
+2026-03-18 09:16:56,823 p=2176 u=root n=ansible | TASK [STEP 1.1: Update OS] ***************************************************************************************************************************
+2026-03-18 09:17:40,542 p=2176 u=root n=ansible | changed: [localhost]
+2026-03-18 09:17:40,548 p=2176 u=root n=ansible | TASK [STEP 1.2: Download compat-openssl10] ***********************************************************************************************************
+2026-03-18 09:17:41,548 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:17:41,554 p=2176 u=root n=ansible | TASK [STEP 1.2: Download oracle-preinstall-21c] ******************************************************************************************************
+2026-03-18 09:17:42,067 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:17:42,073 p=2176 u=root n=ansible | TASK [STEP 1.2: Install compat-openssl10] ************************************************************************************************************
+2026-03-18 09:17:45,583 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:17:45,589 p=2176 u=root n=ansible | TASK [STEP 1.2: Install oracle-preinstall-21c] *******************************************************************************************************
+2026-03-18 09:17:48,694 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:17:48,701 p=2176 u=root n=ansible | TASK [STEP 1.2.1: Ensure groups] *********************************************************************************************************************
+2026-03-18 09:17:49,061 p=2176 u=root n=ansible | ok: [localhost] => (item={'name': 'oinstall', 'gid': 54321})
+2026-03-18 09:17:49,457 p=2176 u=root n=ansible | ok: [localhost] => (item={'name': 'dba', 'gid': 54322})
+2026-03-18 09:17:49,940 p=2176 u=root n=ansible | ok: [localhost] => (item={'name': 'oper', 'gid': 54323})
+2026-03-18 09:17:50,142 p=2176 u=root n=ansible | ok: [localhost] => (item={'name': 'backupdba', 'gid': 54324})
+2026-03-18 09:17:50,481 p=2176 u=root n=ansible | ok: [localhost] => (item={'name': 'dgdba', 'gid': 54325})
+2026-03-18 09:17:51,086 p=2176 u=root n=ansible | ok: [localhost] => (item={'name': 'kmdba', 'gid': 54326})
+2026-03-18 09:17:51,537 p=2176 u=root n=ansible | ok: [localhost] => (item={'name': 'racdba', 'gid': 54327})
+2026-03-18 09:17:51,544 p=2176 u=root n=ansible | TASK [STEP 1.2.1: Ensure oracle user] ****************************************************************************************************************
+2026-03-18 09:17:52,810 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:17:52,817 p=2176 u=root n=ansible | TASK [STEP 1.2.1: Set oracle password] ***************************************************************************************************************
+2026-03-18 09:17:53,278 p=2176 u=root n=ansible | [DEPRECATION WARNING]: Encryption using the Python crypt module is deprecated. The Python crypt module is deprecated and will be removed from Python 
+3.13. Install the passlib library for continued encryption functionality. This feature will be removed in version 2.17. Deprecation warnings can be 
+disabled by setting deprecation_warnings=False in ansible.cfg.
+2026-03-18 09:17:55,554 p=2176 u=root n=ansible | changed: [localhost]
+2026-03-18 09:17:55,560 p=2176 u=root n=ansible | TASK [STEP 1.2.2: Configure oracle .bash_profile] ****************************************************************************************************
+2026-03-18 09:17:56,096 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:17:56,103 p=2176 u=root n=ansible | TASK [STEP 1.3: Install additional packages] *********************************************************************************************************
+2026-03-18 09:17:58,450 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:17:58,456 p=2176 u=root n=ansible | TASK [STEP 1.4: Create directories] ******************************************************************************************************************
+2026-03-18 09:17:58,984 p=2176 u=root n=ansible | ok: [localhost] => (item=/u01/app/oracle/product/21c/dbhome_1)
+2026-03-18 09:17:59,309 p=2176 u=root n=ansible | changed: [localhost] => (item=/u01/app/oraInventory)
+2026-03-18 09:17:59,316 p=2176 u=root n=ansible | TASK [STEP 1.5: Configure root .bash_profile] ********************************************************************************************************
+2026-03-18 09:17:59,558 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:17:59,569 p=2176 u=root n=ansible | TASK [STEP 1.6: Set hostname] ************************************************************************************************************************
+2026-03-18 09:18:00,322 p=2176 u=root n=ansible | changed: [localhost]
+2026-03-18 09:18:00,367 p=2176 u=root n=ansible | TASK [STEP 1.6: Get server IP] ***********************************************************************************************************************
+2026-03-18 09:18:00,384 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:18:00,389 p=2176 u=root n=ansible | TASK [STEP 1.6: Update /etc/hosts] *******************************************************************************************************************
+2026-03-18 09:18:00,891 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:18:00,902 p=2176 u=root n=ansible | TASK [STEP 2.1: Check ZIP locally] *******************************************************************************************************************
+2026-03-18 09:18:48,490 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:18:48,556 p=2176 u=root n=ansible | TASK [STEP 2.2: Upload ZIP] **************************************************************************************************************************
+2026-03-18 09:20:22,554 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:20:22,580 p=2176 u=root n=ansible | TASK [STEP 2.2: Verify ZIP] **************************************************************************************************************************
+2026-03-18 09:21:01,892 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:21:01,907 p=2176 u=root n=ansible | TASK [STEP 2.3: Check extracted] *********************************************************************************************************************
+2026-03-18 09:21:02,211 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:21:02,221 p=2176 u=root n=ansible | TASK [STEP 2.3: Extract ZIP] *************************************************************************************************************************
+2026-03-18 09:21:02,239 p=2176 u=root n=ansible | skipping: [localhost]
+2026-03-18 09:21:02,245 p=2176 u=root n=ansible | TASK [STEP 2.3: Set ownership] ***********************************************************************************************************************
+2026-03-18 09:21:44,257 p=2176 u=root n=ansible | changed: [localhost]
+2026-03-18 09:21:44,294 p=2176 u=root n=ansible | TASK [STEP 2.3: Set runInstaller perms] **************************************************************************************************************
+2026-03-18 09:21:44,649 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:21:44,655 p=2176 u=root n=ansible | TASK [STEP 3.1: Install compat libraries] ************************************************************************************************************
+2026-03-18 09:21:47,876 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:21:47,882 p=2176 u=root n=ansible | TASK [STEP 3.2: Check libpthread] ********************************************************************************************************************
+2026-03-18 09:21:48,161 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:21:48,167 p=2176 u=root n=ansible | TASK [STEP 3.2: Create dummy libpthread] *************************************************************************************************************
+2026-03-18 09:21:48,455 p=2176 u=root n=ansible | changed: [localhost]
+2026-03-18 09:21:48,462 p=2176 u=root n=ansible | TASK [STEP 3.3: Fix LDFLAGS] *************************************************************************************************************************
+2026-03-18 09:21:48,774 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:21:48,780 p=2176 u=root n=ansible | TASK [STEP 3.4: Create stat_wrap.c] ******************************************************************************************************************
+2026-03-18 09:21:49,240 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:21:49,245 p=2176 u=root n=ansible | TASK [STEP 3.4: Compile stat_wrap] *******************************************************************************************************************
+2026-03-18 09:21:49,484 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:21:49,490 p=2176 u=root n=ansible | TASK [STEP 3.4: Check injection libnnzst] ************************************************************************************************************
+2026-03-18 09:21:49,735 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:21:49,742 p=2176 u=root n=ansible | TASK [STEP 3.4: Inject libnnzst] *********************************************************************************************************************
+2026-03-18 09:21:49,759 p=2176 u=root n=ansible | skipping: [localhost]
+2026-03-18 09:21:49,766 p=2176 u=root n=ansible | TASK [STEP 3.4: Mark libnnzst] ***********************************************************************************************************************
+2026-03-18 09:21:49,782 p=2176 u=root n=ansible | skipping: [localhost]
+2026-03-18 09:21:49,789 p=2176 u=root n=ansible | TASK [STEP 3.4: Check injection libjavavm] ***********************************************************************************************************
+2026-03-18 09:21:50,066 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:21:50,072 p=2176 u=root n=ansible | TASK [STEP 3.4: Inject libjavavm] ********************************************************************************************************************
+2026-03-18 09:21:50,086 p=2176 u=root n=ansible | skipping: [localhost]
+2026-03-18 09:21:50,092 p=2176 u=root n=ansible | TASK [STEP 3.4: Mark libjavavm] **********************************************************************************************************************
+2026-03-18 09:21:50,107 p=2176 u=root n=ansible | skipping: [localhost]
+2026-03-18 09:21:50,114 p=2176 u=root n=ansible | TASK [STEP 4.1: Create response file] ****************************************************************************************************************
+2026-03-18 09:21:50,646 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:21:50,652 p=2176 u=root n=ansible | TASK [STEP 4.1.5: Ensure ownership] ******************************************************************************************************************
+2026-03-18 09:22:28,737 p=2176 u=root n=ansible | changed: [localhost] => (item=/u01)
+2026-03-18 09:23:05,987 p=2176 u=root n=ansible | ok: [localhost] => (item=/u01/app/oracle)
+2026-03-18 09:23:42,736 p=2176 u=root n=ansible | ok: [localhost] => (item=/u01/app/oracle/product/21c/dbhome_1)
+2026-03-18 09:23:42,966 p=2176 u=root n=ansible | ok: [localhost] => (item=/u01/app/oraInventory)
+2026-03-18 09:23:42,973 p=2176 u=root n=ansible | TASK [STEP 4.2: Check installed] *********************************************************************************************************************
+2026-03-18 09:23:43,229 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:23:43,236 p=2176 u=root n=ansible | TASK [STEP 4.2: Run runInstaller (10-20 min)] ********************************************************************************************************
+2026-03-18 09:23:43,252 p=2176 u=root n=ansible | skipping: [localhost]
+2026-03-18 09:23:43,258 p=2176 u=root n=ansible | TASK [STEP 4.3: Check orainstRoot] *******************************************************************************************************************
+2026-03-18 09:23:43,558 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:23:43,563 p=2176 u=root n=ansible | TASK [STEP 4.3: Run orainstRoot] *********************************************************************************************************************
+2026-03-18 09:23:43,963 p=2176 u=root n=ansible | changed: [localhost]
+2026-03-18 09:23:43,970 p=2176 u=root n=ansible | TASK [STEP 4.3: Check root.sh] ***********************************************************************************************************************
+2026-03-18 09:23:44,281 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:23:44,288 p=2176 u=root n=ansible | TASK [STEP 4.3: Run root.sh] *************************************************************************************************************************
+2026-03-18 09:23:44,844 p=2176 u=root n=ansible | changed: [localhost]
+2026-03-18 09:23:44,850 p=2176 u=root n=ansible | TASK [STEP 4.4: Fix oradism suid permission] *********************************************************************************************************
+2026-03-18 09:23:45,105 p=2176 u=root n=ansible | changed: [localhost]
+2026-03-18 09:23:45,111 p=2176 u=root n=ansible | TASK [STEP 5.1: Check listener] **********************************************************************************************************************
+2026-03-18 09:23:45,670 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:23:45,677 p=2176 u=root n=ansible | TASK [STEP 5.1: Create listener] *********************************************************************************************************************
+2026-03-18 09:23:45,694 p=2176 u=root n=ansible | skipping: [localhost]
+2026-03-18 09:23:45,699 p=2176 u=root n=ansible | TASK [STEP 5.3: Create listener.ora] *****************************************************************************************************************
+2026-03-18 09:23:46,361 p=2176 u=root n=ansible | changed: [localhost]
+2026-03-18 09:23:46,367 p=2176 u=root n=ansible | TASK [STEP 5.3: Restart listener] ********************************************************************************************************************
+2026-03-18 09:23:48,867 p=2176 u=root n=ansible | changed: [localhost]
+2026-03-18 09:23:48,874 p=2176 u=root n=ansible | TASK [STEP 5.4: Check DB exists] *********************************************************************************************************************
+2026-03-18 09:23:49,204 p=2176 u=root n=ansible | ok: [localhost]
+2026-03-18 09:23:49,211 p=2176 u=root n=ansible | TASK [STEP 5.4: Debug DB check result] ***************************************************************************************************************
+2026-03-18 09:23:49,231 p=2176 u=root n=ansible | ok: [localhost] => {
+    "msg": [
+        "db_check.rc: 0",
+        "db_check.stdout: SELECT instance_name FROM v$instance\n*\nERROR at line 1:\nORA-01034: ORACLE not available\nProcess ID: 0\nSession ID: 0 Serial number: 0",
+        "Contains ORA-: True",
+        "Contains ORCL: False"
+    ]
+}
+2026-03-18 09:23:49,237 p=2176 u=root n=ansible | TASK [STEP 5.4: Create DB (15-30 min)] ***************************************************************************************************************
+2026-03-18 09:24:20,855 p=2176 u=root n=ansible | fatal: [localhost]: FAILED! => {"ansible_job_id": "j20466385293.3461", "changed": true, "cmd": "export CV_ASSUME_DISTID=OEL8.4\nexport ORACLE_BASE=/u01/app/oracle\nexport ORACLE_HOME=/u01/app/oracle/product/21c/dbhome_1\nexport ORACLE_SID=ORCL\n/u01/app/oracle/product/21c/dbhome_1/bin/dbca -silent -createDatabase  -templateName General_Purpose.dbc  -gdbname ORCL  -sid ORCL  -createAsContainerDatabase true  -numberOfPDBs 1  -pdbName ORCLPDB1  -pdbAdminPassword Oracle_4U  -databaseType MULTIPURPOSE  -totalMemory 2048  -storageType FS  -datafileDestination /u01/app/oracle/oradata  -redoLogFileSize 50  -emConfiguration NONE  -characterSet AL32UTF8  -sysPassword Oracle_4U  -systemPassword Oracle_4U\n", "delta": "0:00:16.488396", "end": "2026-03-18 09:24:06.765427", "finished": 1, "msg": "non-zero return code", "rc": 254, "results_file": "/home/oracle/.ansible_async/j20466385293.3461", "start": "2026-03-18 09:23:50.277031", "started": 1, "stderr": "", "stderr_lines": [], "stdout": "[WARNING] [DBT-10328] Specified GDB Name (ORCL) may have a potential conflict with an already existing database on the system.\n   ACTION: Specify a different GDB Name that does not conflict with existing databases on the system.\n[FATAL] [DBT-10317] Specified SID Name (ORCL) already exists.\n   ACTION: Specify a different SID Name that does not already exist.", "stdout_lines": ["[WARNING] [DBT-10328] Specified GDB Name (ORCL) may have a potential conflict with an already existing database on the system.", "   ACTION: Specify a different GDB Name that does not conflict with existing databases on the system.", "[FATAL] [DBT-10317] Specified SID Name (ORCL) already exists.", "   ACTION: Specify a different SID Name that does not already exist."]}
+2026-03-18 09:24:20,857 p=2176 u=root n=ansible | PLAY RECAP *******************************************************************************************************************************************
+2026-03-18 09:24:20,857 p=2176 u=root n=ansible | localhost                  : ok=48   changed=12   unreachable=0    failed=1    skipped=7    rescued=0    ignored=0   
+2026-03-18 09:31:11,000 p=3620 u=root n=ansible | PLAY [Install Oracle Database 21c on Oracle Linux 9] *************************************************************************************************
+2026-03-18 09:31:11,030 p=3620 u=root n=ansible | TASK [Gathering Facts] *******************************************************************************************************************************
+2026-03-18 09:31:12,520 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:31:12,535 p=3620 u=root n=ansible | TASK [Check Oracle Linux] ****************************************************************************************************************************
+2026-03-18 09:31:12,894 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:31:12,900 p=3620 u=root n=ansible | TASK [Get OL version] ********************************************************************************************************************************
+2026-03-18 09:31:13,875 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:31:13,882 p=3620 u=root n=ansible | TASK [Verify OL9] ************************************************************************************************************************************
+2026-03-18 09:31:13,899 p=3620 u=root n=ansible | ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+2026-03-18 09:31:13,905 p=3620 u=root n=ansible | TASK [Display resources] *****************************************************************************************************************************
+2026-03-18 09:31:13,923 p=3620 u=root n=ansible | ok: [localhost] => {
+    "msg": [
+        "RAM: 3462MB",
+        "Swap: 4039MB",
+        "CPU: 2"
+    ]
+}
+2026-03-18 09:31:13,929 p=3620 u=root n=ansible | TASK [Warn low RAM] **********************************************************************************************************************************
+2026-03-18 09:31:13,947 p=3620 u=root n=ansible | ok: [localhost] => {
+    "msg": "WARNING: RAM < 8GB"
+}
+2026-03-18 09:31:13,952 p=3620 u=root n=ansible | TASK [STEP 1.1: Update OS] ***************************************************************************************************************************
+2026-03-18 09:31:18,944 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:31:18,951 p=3620 u=root n=ansible | TASK [STEP 1.2: Download compat-openssl10] ***********************************************************************************************************
+2026-03-18 09:31:20,006 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:31:20,012 p=3620 u=root n=ansible | TASK [STEP 1.2: Download oracle-preinstall-21c] ******************************************************************************************************
+2026-03-18 09:31:20,532 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:31:20,538 p=3620 u=root n=ansible | TASK [STEP 1.2: Install compat-openssl10] ************************************************************************************************************
+2026-03-18 09:31:26,058 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:31:26,063 p=3620 u=root n=ansible | TASK [STEP 1.2: Install oracle-preinstall-21c] *******************************************************************************************************
+2026-03-18 09:31:29,100 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:31:29,107 p=3620 u=root n=ansible | TASK [STEP 1.2.1: Ensure groups] *********************************************************************************************************************
+2026-03-18 09:31:29,463 p=3620 u=root n=ansible | ok: [localhost] => (item={'name': 'oinstall', 'gid': 54321})
+2026-03-18 09:31:29,688 p=3620 u=root n=ansible | ok: [localhost] => (item={'name': 'dba', 'gid': 54322})
+2026-03-18 09:31:29,914 p=3620 u=root n=ansible | ok: [localhost] => (item={'name': 'oper', 'gid': 54323})
+2026-03-18 09:31:30,133 p=3620 u=root n=ansible | ok: [localhost] => (item={'name': 'backupdba', 'gid': 54324})
+2026-03-18 09:31:30,347 p=3620 u=root n=ansible | ok: [localhost] => (item={'name': 'dgdba', 'gid': 54325})
+2026-03-18 09:31:30,586 p=3620 u=root n=ansible | ok: [localhost] => (item={'name': 'kmdba', 'gid': 54326})
+2026-03-18 09:31:30,793 p=3620 u=root n=ansible | ok: [localhost] => (item={'name': 'racdba', 'gid': 54327})
+2026-03-18 09:31:30,800 p=3620 u=root n=ansible | TASK [STEP 1.2.1: Ensure oracle user] ****************************************************************************************************************
+2026-03-18 09:31:31,410 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:31:31,418 p=3620 u=root n=ansible | TASK [STEP 1.2.1: Set oracle password] ***************************************************************************************************************
+2026-03-18 09:31:31,623 p=3620 u=root n=ansible | [DEPRECATION WARNING]: Encryption using the Python crypt module is deprecated. The Python crypt module is deprecated and will be removed from Python 
+3.13. Install the passlib library for continued encryption functionality. This feature will be removed in version 2.17. Deprecation warnings can be 
+disabled by setting deprecation_warnings=False in ansible.cfg.
+2026-03-18 09:31:33,074 p=3620 u=root n=ansible | changed: [localhost]
+2026-03-18 09:31:33,081 p=3620 u=root n=ansible | TASK [STEP 1.2.2: Configure oracle .bash_profile] ****************************************************************************************************
+2026-03-18 09:31:33,483 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:31:33,488 p=3620 u=root n=ansible | TASK [STEP 1.3: Install additional packages] *********************************************************************************************************
+2026-03-18 09:31:35,912 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:31:35,918 p=3620 u=root n=ansible | TASK [STEP 1.4: Create directories] ******************************************************************************************************************
+2026-03-18 09:31:36,279 p=3620 u=root n=ansible | ok: [localhost] => (item=/u01/app/oracle/product/21c/dbhome_1)
+2026-03-18 09:31:36,512 p=3620 u=root n=ansible | changed: [localhost] => (item=/u01/app/oraInventory)
+2026-03-18 09:31:36,520 p=3620 u=root n=ansible | TASK [STEP 1.5: Configure root .bash_profile] ********************************************************************************************************
+2026-03-18 09:31:36,773 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:31:36,779 p=3620 u=root n=ansible | TASK [STEP 1.6: Set hostname] ************************************************************************************************************************
+2026-03-18 09:31:37,630 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:31:37,654 p=3620 u=root n=ansible | TASK [STEP 1.6: Get server IP] ***********************************************************************************************************************
+2026-03-18 09:31:37,672 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:31:37,681 p=3620 u=root n=ansible | TASK [STEP 1.6: Update /etc/hosts] *******************************************************************************************************************
+2026-03-18 09:31:38,045 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:31:38,056 p=3620 u=root n=ansible | TASK [STEP 2.1: Check ZIP locally] *******************************************************************************************************************
+2026-03-18 09:32:19,090 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:32:19,113 p=3620 u=root n=ansible | TASK [STEP 2.2: Upload ZIP] **************************************************************************************************************************
+2026-03-18 09:33:53,890 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:33:53,922 p=3620 u=root n=ansible | TASK [STEP 2.2: Verify ZIP] **************************************************************************************************************************
+2026-03-18 09:34:37,134 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:34:37,147 p=3620 u=root n=ansible | TASK [STEP 2.3: Check extracted] *********************************************************************************************************************
+2026-03-18 09:34:37,590 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:34:37,633 p=3620 u=root n=ansible | TASK [STEP 2.3: Extract ZIP] *************************************************************************************************************************
+2026-03-18 09:34:37,647 p=3620 u=root n=ansible | skipping: [localhost]
+2026-03-18 09:34:37,653 p=3620 u=root n=ansible | TASK [STEP 2.3: Set ownership] ***********************************************************************************************************************
+2026-03-18 09:35:14,424 p=3620 u=root n=ansible | changed: [localhost]
+2026-03-18 09:35:14,431 p=3620 u=root n=ansible | TASK [STEP 2.3: Set runInstaller perms] **************************************************************************************************************
+2026-03-18 09:35:14,708 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:35:14,715 p=3620 u=root n=ansible | TASK [STEP 3.1: Install compat libraries] ************************************************************************************************************
+2026-03-18 09:35:17,339 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:35:17,348 p=3620 u=root n=ansible | TASK [STEP 3.2: Check libpthread] ********************************************************************************************************************
+2026-03-18 09:35:17,593 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:35:17,599 p=3620 u=root n=ansible | TASK [STEP 3.2: Create dummy libpthread] *************************************************************************************************************
+2026-03-18 09:35:17,894 p=3620 u=root n=ansible | changed: [localhost]
+2026-03-18 09:35:17,900 p=3620 u=root n=ansible | TASK [STEP 3.3: Fix LDFLAGS] *************************************************************************************************************************
+2026-03-18 09:35:18,191 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:35:18,197 p=3620 u=root n=ansible | TASK [STEP 3.4: Create stat_wrap.c] ******************************************************************************************************************
+2026-03-18 09:35:18,621 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:35:18,627 p=3620 u=root n=ansible | TASK [STEP 3.4: Compile stat_wrap] *******************************************************************************************************************
+2026-03-18 09:35:18,859 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:35:18,865 p=3620 u=root n=ansible | TASK [STEP 3.4: Check injection libnnzst] ************************************************************************************************************
+2026-03-18 09:35:19,110 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:35:19,116 p=3620 u=root n=ansible | TASK [STEP 3.4: Inject libnnzst] *********************************************************************************************************************
+2026-03-18 09:35:19,131 p=3620 u=root n=ansible | skipping: [localhost]
+2026-03-18 09:35:19,138 p=3620 u=root n=ansible | TASK [STEP 3.4: Mark libnnzst] ***********************************************************************************************************************
+2026-03-18 09:35:19,156 p=3620 u=root n=ansible | skipping: [localhost]
+2026-03-18 09:35:19,164 p=3620 u=root n=ansible | TASK [STEP 3.4: Check injection libjavavm] ***********************************************************************************************************
+2026-03-18 09:35:19,413 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:35:19,420 p=3620 u=root n=ansible | TASK [STEP 3.4: Inject libjavavm] ********************************************************************************************************************
+2026-03-18 09:35:19,435 p=3620 u=root n=ansible | skipping: [localhost]
+2026-03-18 09:35:19,441 p=3620 u=root n=ansible | TASK [STEP 3.4: Mark libjavavm] **********************************************************************************************************************
+2026-03-18 09:35:19,456 p=3620 u=root n=ansible | skipping: [localhost]
+2026-03-18 09:35:19,463 p=3620 u=root n=ansible | TASK [STEP 4.1: Create response file] ****************************************************************************************************************
+2026-03-18 09:35:19,892 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:35:19,899 p=3620 u=root n=ansible | TASK [STEP 4.1.5: Ensure ownership] ******************************************************************************************************************
+2026-03-18 09:35:57,099 p=3620 u=root n=ansible | changed: [localhost] => (item=/u01)
+2026-03-18 09:36:35,075 p=3620 u=root n=ansible | ok: [localhost] => (item=/u01/app/oracle)
+2026-03-18 09:37:10,628 p=3620 u=root n=ansible | ok: [localhost] => (item=/u01/app/oracle/product/21c/dbhome_1)
+2026-03-18 09:37:10,873 p=3620 u=root n=ansible | ok: [localhost] => (item=/u01/app/oraInventory)
+2026-03-18 09:37:10,881 p=3620 u=root n=ansible | TASK [STEP 4.2: Check installed] *********************************************************************************************************************
+2026-03-18 09:37:11,165 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:37:11,171 p=3620 u=root n=ansible | TASK [STEP 4.2: Run runInstaller (10-20 min)] ********************************************************************************************************
+2026-03-18 09:37:11,189 p=3620 u=root n=ansible | skipping: [localhost]
+2026-03-18 09:37:11,195 p=3620 u=root n=ansible | TASK [STEP 4.3: Check orainstRoot] *******************************************************************************************************************
+2026-03-18 09:37:11,457 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:37:11,462 p=3620 u=root n=ansible | TASK [STEP 4.3: Run orainstRoot] *********************************************************************************************************************
+2026-03-18 09:37:11,756 p=3620 u=root n=ansible | changed: [localhost]
+2026-03-18 09:37:11,763 p=3620 u=root n=ansible | TASK [STEP 4.3: Check root.sh] ***********************************************************************************************************************
+2026-03-18 09:37:12,032 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:37:12,039 p=3620 u=root n=ansible | TASK [STEP 4.3: Run root.sh] *************************************************************************************************************************
+2026-03-18 09:37:12,521 p=3620 u=root n=ansible | changed: [localhost]
+2026-03-18 09:37:12,528 p=3620 u=root n=ansible | TASK [STEP 4.4: Fix oradism suid permission] *********************************************************************************************************
+2026-03-18 09:37:12,792 p=3620 u=root n=ansible | changed: [localhost]
+2026-03-18 09:37:12,799 p=3620 u=root n=ansible | TASK [STEP 5.1: Check listener] **********************************************************************************************************************
+2026-03-18 09:37:13,161 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:37:13,167 p=3620 u=root n=ansible | TASK [STEP 5.1: Create listener] *********************************************************************************************************************
+2026-03-18 09:37:13,186 p=3620 u=root n=ansible | skipping: [localhost]
+2026-03-18 09:37:13,193 p=3620 u=root n=ansible | TASK [STEP 5.3: Create listener.ora] *****************************************************************************************************************
+2026-03-18 09:37:13,644 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:37:13,651 p=3620 u=root n=ansible | TASK [STEP 5.3: Restart listener] ********************************************************************************************************************
+2026-03-18 09:37:16,048 p=3620 u=root n=ansible | changed: [localhost]
+2026-03-18 09:37:16,055 p=3620 u=root n=ansible | TASK [STEP 5.4: Check DB datafile exists] ************************************************************************************************************
+2026-03-18 09:37:28,229 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:37:28,235 p=3620 u=root n=ansible | TASK [STEP 5.4: Debug DB check result] ***************************************************************************************************************
+2026-03-18 09:37:28,255 p=3620 u=root n=ansible | ok: [localhost] => {
+    "msg": [
+        "system01.dbf exists: True",
+        "DB already created - skipping DBCA"
+    ]
+}
+2026-03-18 09:37:28,261 p=3620 u=root n=ansible | TASK [STEP 5.4: Create DB (15-30 min)] ***************************************************************************************************************
+2026-03-18 09:37:28,277 p=3620 u=root n=ansible | skipping: [localhost]
+2026-03-18 09:37:28,284 p=3620 u=root n=ansible | TASK [STEP 5.5: Open PDB] ****************************************************************************************************************************
+2026-03-18 09:37:28,600 p=3620 u=root n=ansible | changed: [localhost]
+2026-03-18 09:37:28,607 p=3620 u=root n=ansible | TASK [STEP 6.1: Create tnsnames.ora] *****************************************************************************************************************
+2026-03-18 09:37:29,080 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:37:29,086 p=3620 u=root n=ansible | TASK [STEP 6.2: Open firewall] ***********************************************************************************************************************
+2026-03-18 09:37:29,680 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:37:29,686 p=3620 u=root n=ansible | TASK [STEP 7.0: Ensure DB is running] ****************************************************************************************************************
+2026-03-18 09:39:30,363 p=3620 u=root n=ansible | changed: [localhost]
+2026-03-18 09:39:32,331 p=3620 u=root n=ansible | TASK [STEP 7.1: Open PDB and register] ***************************************************************************************************************
+2026-03-18 09:39:40,329 p=3620 u=root n=ansible | changed: [localhost]
+2026-03-18 09:39:40,557 p=3620 u=root n=ansible | TASK [STEP 7.2: Wait for registration] ***************************************************************************************************************
+2026-03-18 09:39:40,830 p=3620 u=root n=ansible | Pausing for 15 seconds
+2026-03-18 09:39:40,852 p=3620 u=root n=ansible | (ctrl+C then 'C' = continue early, ctrl+C then 'A' = abort)
+2026-03-18 09:39:55,819 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:39:55,848 p=3620 u=root n=ansible | TASK [STEP 7.3: Verify service registered] ***********************************************************************************************************
+2026-03-18 09:39:57,956 p=3620 u=root n=ansible | changed: [localhost]
+2026-03-18 09:39:57,961 p=3620 u=root n=ansible | TASK [STEP 7.4: Display listener status] *************************************************************************************************************
+2026-03-18 09:39:58,221 p=3620 u=root n=ansible | changed: [localhost]
+2026-03-18 09:39:58,227 p=3620 u=root n=ansible | TASK [STEP 7.4: Show services] ***********************************************************************************************************************
+2026-03-18 09:39:58,246 p=3620 u=root n=ansible | ok: [localhost] => {
+    "msg": [
+        "",
+        "LSNRCTL for Linux: Version 21.0.0.0.0 - Production on 18-MAR-2026 09:39:58",
+        "",
+        "Copyright (c) 1991, 2021, Oracle.  All rights reserved.",
+        "",
+        "Connecting to (DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=192.168.1.195)(PORT=1521)))",
+        "STATUS of the LISTENER",
+        "------------------------",
+        "Alias                     LISTENER",
+        "Version                   TNSLSNR for Linux: Version 21.0.0.0.0 - Production",
+        "Start Date                18-MAR-2026 09:37:15",
+        "Uptime                    0 days 0 hr. 2 min. 42 sec",
+        "Trace Level               off",
+        "Security                  ON: Local OS Authentication",
+        "SNMP                      OFF",
+        "Listener Parameter File   /u01/app/oracle/product/21c/dbhome_1/network/admin/listener.ora",
+        "Listener Log File         /u01/app/oracle/diag/tnslsnr/oracledb/listener/alert/log.xml",
+        "Listening Endpoints Summary...",
+        "  (DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=192.168.1.195)(PORT=1521)))",
+        "  (DESCRIPTION=(ADDRESS=(PROTOCOL=ipc)(KEY=EXTPROC1521)))",
+        "Services Summary...",
+        "Service \"4d375e718148709de063c301a8c05c81\" has 1 instance(s).",
+        "  Instance \"ORCL\", status READY, has 1 handler(s) for this service...",
+        "Service \"ORCL\" has 2 instance(s).",
+        "  Instance \"ORCL\", status UNKNOWN, has 1 handler(s) for this service...",
+        "  Instance \"ORCL\", status READY, has 1 handler(s) for this service...",
+        "Service \"ORCLXDB\" has 1 instance(s).",
+        "  Instance \"ORCL\", status READY, has 1 handler(s) for this service...",
+        "Service \"ORCL_DGMGRL\" has 1 instance(s).",
+        "  Instance \"ORCL\", status UNKNOWN, has 1 handler(s) for this service...",
+        "Service \"orclpdb1\" has 1 instance(s).",
+        "  Instance \"ORCL\", status READY, has 1 handler(s) for this service...",
+        "The command completed successfully"
+    ]
+}
+2026-03-18 09:39:58,252 p=3620 u=root n=ansible | TASK [STEP 7.5: Create user] *************************************************************************************************************************
+2026-03-18 09:39:59,288 p=3620 u=root n=ansible | changed: [localhost]
+2026-03-18 09:39:59,295 p=3620 u=root n=ansible | TASK [STEP 7.6: Test connection] *********************************************************************************************************************
+2026-03-18 09:40:00,003 p=3620 u=root n=ansible | changed: [localhost]
+2026-03-18 09:40:00,010 p=3620 u=root n=ansible | TASK [STEP 7.7: Display test result] *****************************************************************************************************************
+2026-03-18 09:40:00,030 p=3620 u=root n=ansible | ok: [localhost] => {
+    "test_conn.stdout_lines": [
+        "",
+        "'O",
+        "--",
+        "OK"
+    ]
+}
+2026-03-18 09:40:00,036 p=3620 u=root n=ansible | TASK [STEP 8.1: Disable SELinux] *********************************************************************************************************************
+2026-03-18 09:40:01,376 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:40:01,383 p=3620 u=root n=ansible | TASK [STEP 8.2: Set bin dir permission (no recurse)] *************************************************************************************************
+2026-03-18 09:40:01,666 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:40:01,672 p=3620 u=root n=ansible | TASK [STEP 8.2: Re-fix oradism suid after any permission changes] ************************************************************************************
+2026-03-18 09:40:01,900 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:40:01,907 p=3620 u=root n=ansible | TASK [STEP 8.3: Configure oratab] ********************************************************************************************************************
+2026-03-18 09:40:02,260 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:40:02,267 p=3620 u=root n=ansible | TASK [STEP 8.4: Save PDB state] **********************************************************************************************************************
+2026-03-18 09:40:02,932 p=3620 u=root n=ansible | changed: [localhost]
+2026-03-18 09:40:02,938 p=3620 u=root n=ansible | TASK [STEP 8.5: Create systemd service] **************************************************************************************************************
+2026-03-18 09:40:03,889 p=3620 u=root n=ansible | changed: [localhost]
+2026-03-18 09:40:03,896 p=3620 u=root n=ansible | TASK [STEP 8.6: Enable service] **********************************************************************************************************************
+2026-03-18 09:40:07,363 p=3620 u=root n=ansible | ok: [localhost]
+2026-03-18 09:40:07,370 p=3620 u=root n=ansible | TASK [Installation Summary] **************************************************************************************************************************
+2026-03-18 09:40:07,426 p=3620 u=root n=ansible | ok: [localhost] => {
+    "msg": [
+        "==========================================",
+        "Oracle Database 21c - INSTALLATION COMPLETE",
+        "==========================================",
+        "",
+        "Connection: 192.168.1.195:1521",
+        "CDB: ORCL",
+        "PDB: orclpdb1",
+        "",
+        "User: chirag",
+        "Pass: Tiger123",
+        "",
+        "SYS: Oracle_4U (SYSDBA)",
+        "",
+        "Connection String:",
+        "chirag/Tiger123@192.168.1.195:1521/orclpdb1",
+        ""
+    ]
+}
+2026-03-18 09:40:07,447 p=3620 u=root n=ansible | PLAY RECAP *******************************************************************************************************************************************
+2026-03-18 09:40:07,448 p=3620 u=root n=ansible | localhost                  : ok=68   changed=18   unreachable=0    failed=0    skipped=8    rescued=0    ignored=0   

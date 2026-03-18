@@ -1,0 +1,384 @@
+# setup_primary.yml
+# Cấu hình Data Guard - PRIMARY (192.168.1.195)
+# Chạy trực tiếp trên server 195:
+#   ansible-playbook setup_primary.yml
+#
+# Lưu ý: Lần đầu chạy, cần nhập password SSH của server 196
+# khi task "DG-P1: Copy SSH key sang Standby" hỏi.
+# Các lần sau SSH key đã có, không cần nhập gì thêm.
+#
+# Sau khi chạy xong -> chạy setup_standby.yml trên server 196
+---
+- name: Setup Oracle Data Guard - Primary (192.168.1.195)
+  hosts: localhost
+  connection: local
+  become: yes
+  vars:
+    oracle_home: /u01/app/oracle/product/21c/dbhome_1
+    oracle_base: /u01/app/oracle
+    oracle_sid: ORCL
+    oracle_unique_name: ORCL
+    standby_unique_name: ORCL_STBY
+    primary_ip: 192.168.1.195
+    standby_ip: 192.168.1.196
+    listener_port: 1521
+    fra_dest: /u01/app/oracle/fast_recovery_area
+    fra_size: 20G
+    sys_password: "Oracle_4U"
+
+  tasks:
+
+    # ==========================================
+    # STEP 1: Setup SSH Key từ root@195 → root@196
+    # Idempotent: chỉ generate và copy nếu chưa có
+    # Lần đầu sẽ hỏi password SSH của server 196
+    # ==========================================
+    - name: "DG-P1: Ensure .ssh directory tồn tại"
+      file:
+        path: /root/.ssh
+        state: directory
+        mode: '0700'
+      tags: [ssh_setup]
+
+    - name: "DG-P1: Generate SSH key cho root (nếu chưa có)"
+      shell: ssh-keygen -t rsa -b 4096 -N "" -f /root/.ssh/id_rsa
+      args:
+        creates: /root/.ssh/id_rsa
+      tags: [ssh_setup]
+
+    - name: "DG-P1: Copy SSH key sang Standby (hỏi password 1 lần)"
+      shell: |
+        ssh-copy-id -o StrictHostKeyChecking=no root@{{ standby_ip }}
+        touch /root/.ssh/.ssh_copy_done_{{ standby_ip }}
+      args:
+        creates: /root/.ssh/.ssh_copy_done_{{ standby_ip }}
+      tags: [ssh_setup]
+
+    - name: "DG-P1: Verify SSH không cần password"
+      shell: ssh -o StrictHostKeyChecking=no -o BatchMode=yes root@{{ standby_ip }} "echo OK"
+      register: ssh_test
+      changed_when: false
+      failed_when: ssh_test.rc != 0
+      tags: [ssh_setup]
+
+    - name: "DG-P1: SSH test result"
+      debug:
+        msg: "SSH to {{ standby_ip }}: {{ ssh_test.stdout }}"
+      tags: [ssh_setup]
+
+    # ==========================================
+    # STEP 2: Bật Archive Log Mode
+    # ==========================================
+    - name: "DG-P2: Check Archive Log mode"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'SQLEOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF
+        SELECT LOG_MODE FROM V$DATABASE;
+        EXIT;
+        SQLEOF
+      register: archivelog_check
+      changed_when: false
+      tags: [archivelog]
+
+    - name: "DG-P2: Enable Archive Log mode"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'SQLEOF'
+        SHUTDOWN IMMEDIATE;
+        STARTUP MOUNT;
+        ALTER DATABASE ARCHIVELOG;
+        ALTER DATABASE OPEN;
+        ALTER PLUGGABLE DATABASE ALL OPEN;
+        EXIT;
+        SQLEOF
+      when: "'NOARCHIVELOG' in archivelog_check.stdout"
+      tags: [archivelog]
+
+    - name: "DG-P2: Verify Archive Log mode"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'SQLEOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF
+        SELECT LOG_MODE FROM V$DATABASE;
+        EXIT;
+        SQLEOF
+      register: archivelog_verify
+      changed_when: false
+      tags: [archivelog]
+
+    - name: "DG-P2: Assert Archive Log enabled"
+      assert:
+        that: "'ARCHIVELOG' in archivelog_verify.stdout"
+        fail_msg: "Bật ARCHIVELOG thất bại!"
+      tags: [archivelog]
+
+    # ==========================================
+    # STEP 3: Bật Force Logging + Flashback
+    # ==========================================
+    - name: "DG-P3: Enable Force Logging và Flashback"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'SQLEOF'
+        ALTER DATABASE FORCE LOGGING;
+        ALTER SYSTEM SWITCH LOGFILE;
+        ALTER DATABASE FLASHBACK ON;
+        EXIT;
+        SQLEOF
+      tags: [force_logging]
+
+    - name: "DG-P3: Verify Force Logging"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'SQLEOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF
+        SELECT FORCE_LOGGING, FLASHBACK_ON FROM V$DATABASE;
+        EXIT;
+        SQLEOF
+      register: force_logging_verify
+      changed_when: false
+      tags: [force_logging]
+
+    - name: "DG-P3: Show Force Logging status"
+      debug:
+        msg: "{{ force_logging_verify.stdout_lines }}"
+      tags: [force_logging]
+
+    # ==========================================
+    # STEP 4: Tạo Fast Recovery Area
+    # ==========================================
+    - name: "DG-P4: Create FRA directory"
+      file:
+        path: "{{ fra_dest }}"
+        state: directory
+        owner: oracle
+        group: oinstall
+        mode: '0755'
+      tags: [fra]
+
+    - name: "DG-P4: Configure FRA parameters"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'SQLEOF'
+        ALTER SYSTEM SET DB_RECOVERY_FILE_DEST_SIZE={{ fra_size }} SCOPE=BOTH;
+        ALTER SYSTEM SET DB_RECOVERY_FILE_DEST='{{ fra_dest }}' SCOPE=BOTH;
+        EXIT;
+        SQLEOF
+      tags: [fra]
+
+    # ==========================================
+    # STEP 5: Tạo Standby Redo Logs
+    # ==========================================
+    - name: "DG-P5: Check Standby Redo Logs đã tồn tại chưa"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'SQLEOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF
+        SELECT COUNT(*) FROM V$LOGFILE WHERE TYPE='STANDBY';
+        EXIT;
+        SQLEOF
+      register: srl_check
+      changed_when: false
+      tags: [standby_redo]
+
+    - name: "DG-P5: Create Standby Redo Logs"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'SQLEOF'
+        ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 10 SIZE 50M;
+        ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 11 SIZE 50M;
+        ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 12 SIZE 50M;
+        ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 13 SIZE 50M;
+        EXIT;
+        SQLEOF
+      when: "'0' in srl_check.stdout"
+      tags: [standby_redo]
+
+    - name: "DG-P5: Verify Standby Redo Logs"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'SQLEOF'
+        SET PAGESIZE 50 LINESIZE 100
+        SELECT GROUP#, TYPE, MEMBER FROM V$LOGFILE WHERE TYPE='STANDBY' ORDER BY GROUP#;
+        EXIT;
+        SQLEOF
+      register: srl_verify
+      changed_when: false
+      tags: [standby_redo]
+
+    - name: "DG-P5: Show Standby Redo Logs"
+      debug:
+        msg: "{{ srl_verify.stdout_lines }}"
+      tags: [standby_redo]
+
+    # ==========================================
+    # STEP 6: Cấu hình Init Parameters cho DG
+    # ==========================================
+    - name: "DG-P6: Set Data Guard init parameters"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'SQLEOF'
+        ALTER SYSTEM SET DB_UNIQUE_NAME='{{ oracle_unique_name }}' SCOPE=SPFILE;
+        ALTER SYSTEM SET LOG_ARCHIVE_CONFIG='DG_CONFIG=({{ oracle_unique_name }},{{ standby_unique_name }})' SCOPE=BOTH;
+        ALTER SYSTEM SET LOG_ARCHIVE_DEST_1='LOCATION=USE_DB_RECOVERY_FILE_DEST VALID_FOR=(ALL_LOGFILES,ALL_ROLES) DB_UNIQUE_NAME={{ oracle_unique_name }}' SCOPE=BOTH;
+        ALTER SYSTEM SET LOG_ARCHIVE_DEST_2='SERVICE={{ standby_unique_name }} ASYNC VALID_FOR=(ONLINE_LOGFILES,PRIMARY_ROLE) DB_UNIQUE_NAME={{ standby_unique_name }}' SCOPE=BOTH;
+        ALTER SYSTEM SET LOG_ARCHIVE_DEST_STATE_1=ENABLE SCOPE=BOTH;
+        ALTER SYSTEM SET LOG_ARCHIVE_DEST_STATE_2=ENABLE SCOPE=BOTH;
+        ALTER SYSTEM SET LOG_ARCHIVE_FORMAT='%t_%s_%r.dbf' SCOPE=SPFILE;
+        ALTER SYSTEM SET LOG_ARCHIVE_MAX_PROCESSES=4 SCOPE=BOTH;
+        ALTER SYSTEM SET REMOTE_LOGIN_PASSWORDFILE=EXCLUSIVE SCOPE=SPFILE;
+        ALTER SYSTEM SET FAL_SERVER='{{ standby_unique_name }}' SCOPE=BOTH;
+        ALTER SYSTEM SET FAL_CLIENT='{{ oracle_unique_name }}' SCOPE=BOTH;
+        ALTER SYSTEM SET STANDBY_FILE_MANAGEMENT=AUTO SCOPE=BOTH;
+        ALTER SYSTEM SET DG_BROKER_START=TRUE SCOPE=BOTH;
+        EXIT;
+        SQLEOF
+      tags: [dg_params]
+
+    # ==========================================
+    # STEP 7: Cấu hình tnsnames.ora
+    # ==========================================
+    - name: "DG-P7: Configure tnsnames.ora"
+      copy:
+        dest: "{{ oracle_home }}/network/admin/tnsnames.ora"
+        owner: oracle
+        group: oinstall
+        content: |
+          {{ oracle_unique_name }} =
+            (DESCRIPTION =
+              (ADDRESS = (PROTOCOL = TCP)(HOST = {{ primary_ip }})(PORT = {{ listener_port }}))
+              (CONNECT_DATA = (SERVICE_NAME = {{ oracle_sid }})))
+
+          {{ standby_unique_name }} =
+            (DESCRIPTION =
+              (ADDRESS = (PROTOCOL = TCP)(HOST = {{ standby_ip }})(PORT = {{ listener_port }}))
+              (CONNECT_DATA = (SERVICE_NAME = {{ oracle_sid }})))
+
+          ORCLPDB1 =
+            (DESCRIPTION =
+              (ADDRESS = (PROTOCOL = TCP)(HOST = {{ primary_ip }})(PORT = {{ listener_port }}))
+              (CONNECT_DATA = (SERVICE_NAME = ORCLPDB1)))
+      tags: [tns]
+
+    # ==========================================
+    # STEP 8: Cấu hình listener.ora
+    # ==========================================
+    - name: "DG-P8: Configure listener.ora"
+      copy:
+        dest: "{{ oracle_home }}/network/admin/listener.ora"
+        owner: oracle
+        group: oinstall
+        content: |
+          LISTENER =
+            (DESCRIPTION_LIST =
+              (DESCRIPTION =
+                (ADDRESS = (PROTOCOL = TCP)(HOST = {{ primary_ip }})(PORT = {{ listener_port }}))
+                (ADDRESS = (PROTOCOL = IPC)(KEY = EXTPROC1521))
+              )
+            )
+
+          SID_LIST_LISTENER =
+            (SID_LIST =
+              (SID_DESC =
+                (GLOBAL_DBNAME = {{ oracle_sid }})
+                (ORACLE_HOME = {{ oracle_home }})
+                (SID_NAME = {{ oracle_sid }})
+              )
+              (SID_DESC =
+                (GLOBAL_DBNAME = {{ oracle_sid }}_DGMGRL)
+                (ORACLE_HOME = {{ oracle_home }})
+                (SID_NAME = {{ oracle_sid }})
+              )
+            )
+      tags: [listener]
+
+    - name: "DG-P8: Reload listener"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        lsnrctl reload
+      tags: [listener]
+
+    # ==========================================
+    # STEP 9: Restart DB để áp dụng SPFILE params
+    # ==========================================
+    - name: "DG-P9: Restart DB để áp dụng SPFILE changes"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'SQLEOF'
+        SHUTDOWN IMMEDIATE;
+        STARTUP;
+        ALTER PLUGGABLE DATABASE ALL OPEN;
+        EXIT;
+        SQLEOF
+      tags: [restart]
+
+    # ==========================================
+    # STEP 10: Copy Password File sang Standby
+    # ==========================================
+    - name: "DG-P10: Copy password file sang Standby qua SSH"
+      shell: |
+        scp -o StrictHostKeyChecking=no \
+          {{ oracle_home }}/dbs/orapw{{ oracle_sid }} \
+          root@{{ standby_ip }}:{{ oracle_home }}/dbs/orapw{{ oracle_sid }}
+      tags: [pwdfile]
+
+    - name: "DG-P10: Fix ownership password file trên Standby"
+      shell: |
+        ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} \
+          "chown oracle:oinstall {{ oracle_home }}/dbs/orapw{{ oracle_sid }}"
+      tags: [pwdfile]
+
+    # ==========================================
+    # SUMMARY
+    # ==========================================
+    - name: "Primary setup hoàn tất"
+      debug:
+        msg:
+          - "============================================"
+          - "Data Guard PRIMARY setup HOÀN TẤT"
+          - "============================================"
+          - "Primary  : {{ oracle_unique_name }} @ {{ primary_ip }}"
+          - "Standby  : {{ standby_unique_name }} @ {{ standby_ip }}"
+          - "Archive  : ARCHIVELOG mode"
+          - "Broker   : DG_BROKER_START=TRUE"
+          - "Password file đã copy sang {{ standby_ip }}"
+          - ""
+          - "Bước tiếp theo:"
+          - "  Chạy setup_standby.yml trên server {{ standby_ip }}"
+          - "============================================"
+      tags: [always]
