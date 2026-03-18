@@ -1,10 +1,20 @@
-# install_oracle21c_FINAL.yml
-# Oracle Database 21c on Oracle Linux 9 - FINAL VERSION
-# Bug fixed: DBCA condition now checks for ORA errors properly
-# Bug fixed: oradism suid bit preserved (was wiped by STEP 8.2 recurse)
-# Bug fixed: systemd service runs as root to allow oradism to work
+# install_oracle21c_standby.yml
+# Oracle Database 21c on Oracle Linux 9 - STANDBY SERVER
+# Dùng cho server: 192.168.1.196
+#
+# Fixes so với bản gốc:
+# [FIX-1] hostname KHÁC với primary (primarydb.local vs standbydb.local)
+#         → tránh Broker build StaticConnectIdentifier trỏ sai IP
+# [FIX-2] listener.ora dùng đúng IP standby + thêm ORCL_STBY_DGMGRL entry
+#         → Broker kết nối static vào standby đúng
+# [FIX-3] DB_UNIQUE_NAME set = ORCL_STBY ngay từ SPFILE sau install
+#         → RMAN duplicate không cần phải override lại
+# [FIX-4] DG_BROKER_CONFIG_FILE set đúng path (Oracle 21c read-only home)
+# [FIX-5] KHÔNG tạo database bằng DBCA — standby DB sẽ được tạo bởi RMAN duplicate
+# [FIX-6] oradism suid bit preserved
+# [FIX-7] systemd service chạy as root
 ---
-- name: Install Oracle Database 21c (STANDBY ONLY)
+- name: Install Oracle Database 21c on Oracle Linux 9 - STANDBY
   hosts: localhost
   connection: local
   become: yes
@@ -13,20 +23,15 @@
     oracle_home: /u01/app/oracle/product/21c/dbhome_1
     oracle_inventory: /u01/app/oraInventory
     oracle_sid: ORCL
-    db_global_name: ORCL
-    pdb_name: ORCLPDB1
+    oracle_unique_name: ORCL_STBY                    # [FIX-3] DB_UNIQUE_NAME của standby
     sys_password: "Oracle_4U"
-    system_password: "Oracle_4U"
-    pdb_admin_password: "Oracle_4U"
-    db_username: chirag
-    db_user_password: "Tiger123"
-    hostname_fqdn: oracledb.local
-    hostname_short: oracledb
+    hostname_fqdn: standbydb.local                   # [FIX-1] Khác với primary (primarydb.local)
+    hostname_short: standbydb
     listener_port: 1521
-    total_memory: 2048
     zip_file_local: "./LINUX.X64_213000_db_home.zip"
     zip_file_remote: "/tmp/LINUX.X64_213000_db_home.zip"
     cv_assume_distid: "OEL8.4"
+    fra_dest: /u01/app/oracle/fast_recovery_area
 
   tasks:
     # ==========================================
@@ -110,12 +115,12 @@
         state: present
       loop:
         - { name: oinstall, gid: 54321 }
-        - { name: dba, gid: 54322 }
-        - { name: oper, gid: 54323 }
-        - { name: backupdba, gid: 54324 }
-        - { name: dgdba, gid: 54325 }
-        - { name: kmdba, gid: 54326 }
-        - { name: racdba, gid: 54327 }
+        - { name: dba,      gid: 54322 }
+        - { name: oper,     gid: 54323 }
+        - { name: backupdba,gid: 54324 }
+        - { name: dgdba,    gid: 54325 }
+        - { name: kmdba,    gid: 54326 }
+        - { name: racdba,   gid: 54327 }
       tags: [os_prep]
 
     - name: "STEP 1.2.1: Ensure oracle user"
@@ -143,6 +148,7 @@
           export ORACLE_BASE={{ oracle_base }}
           export ORACLE_HOME={{ oracle_home }}
           export ORACLE_SID={{ oracle_sid }}
+          export ORACLE_UNIQ_NAME={{ oracle_unique_name }}
           export PATH=$ORACLE_HOME/bin:$PATH
           export LD_LIBRARY_PATH=$ORACLE_HOME/lib:/lib:/usr/lib
           export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
@@ -180,6 +186,7 @@
       loop:
         - "{{ oracle_home }}"
         - "{{ oracle_inventory }}"
+        - "{{ fra_dest }}"             # Tạo sẵn FRA dir cho RMAN duplicate
       tags: [os_prep]
 
     - name: "STEP 1.5: Configure root .bash_profile"
@@ -197,7 +204,8 @@
         create: yes
       tags: [os_prep]
 
-    - name: "STEP 1.6: Set hostname"
+    # [FIX-1] hostname PHẢI khác primary
+    - name: "STEP 1.6: Set hostname (standby)"
       hostname:
         name: "{{ hostname_fqdn }}"
       tags: [os_prep]
@@ -365,7 +373,8 @@
       tags: [compatibility]
 
     # ==========================================
-    # STEP 4: Install Oracle Software
+    # STEP 4: Install Oracle Software Only
+    # (KHÔNG tạo DB — standby DB do RMAN tạo)
     # ==========================================
     - name: "STEP 4.1: Create response file"
       copy:
@@ -449,12 +458,7 @@
       when: rootsh.stat.exists
       tags: [install]
 
-    # ==========================================
-    # STEP 4.4: Fix oradism permission
-    # BUG FIX: root.sh sets suid on oradism, but STEP 4.1.5 (recurse ownership)
-    # may run AFTER root.sh and wipe the suid bit, causing ORA-12791 on startup.
-    # Always re-apply correct oradism permission after root.sh.
-    # ==========================================
+    # [FIX-6] oradism suid
     - name: "STEP 4.4: Fix oradism suid permission"
       file:
         path: "{{ oracle_home }}/bin/oradism"
@@ -464,20 +468,20 @@
       tags: [install, autostart]
 
     # ==========================================
-    # STEP 5: Listener & Database
+    # STEP 5: Listener (Software Only — không có DB)
     # ==========================================
     - name: "STEP 5.1: Check listener"
+      become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }}
         export PATH=$ORACLE_HOME/bin:$PATH
         lsnrctl status
-      become_user: oracle
       register: listener_status
       failed_when: false
       changed_when: false
       tags: [listener]
 
-    - name: "STEP 5.1: Create listener"
+    - name: "STEP 5.1: Create listener via netca"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }}
@@ -486,7 +490,11 @@
       when: "'TNS-12541' in listener_status.stderr or 'TNS-01106' in listener_status.stderr"
       tags: [listener]
 
-    - name: "STEP 5.3: Create listener.ora"
+    # [FIX-2] listener.ora STANDBY:
+    # - HOST dùng đúng IP standby (server_ip = 192.168.1.196)
+    # - GLOBAL_DBNAME dùng oracle_unique_name (ORCL_STBY) không phải oracle_sid
+    # - Thêm entry ORCL_STBY_DGMGRL cho Broker static connection
+    - name: "STEP 5.3: Create listener.ora (STANDBY)"
       copy:
         dest: "{{ oracle_home }}/network/admin/listener.ora"
         content: |
@@ -500,12 +508,12 @@
           SID_LIST_LISTENER =
             (SID_LIST =
               (SID_DESC =
-                (GLOBAL_DBNAME = {{ oracle_sid }})
+                (GLOBAL_DBNAME = {{ oracle_unique_name }})
                 (ORACLE_HOME = {{ oracle_home }})
                 (SID_NAME = {{ oracle_sid }})
               )
               (SID_DESC =
-                (GLOBAL_DBNAME = {{ oracle_sid }}_DGMGRL)
+                (GLOBAL_DBNAME = {{ oracle_unique_name }}_DGMGRL)
                 (ORACLE_HOME = {{ oracle_home }})
                 (SID_NAME = {{ oracle_sid }})
               )
@@ -523,9 +531,28 @@
         sleep 2
         lsnrctl start
       tags: [listener]
+
     # ==========================================
-    # STEP 6: Network
+    # STEP 6: Network — tnsnames.ora trên Standby
+    # Cần resolve được cả 2 TNS alias để RMAN kết nối
     # ==========================================
+    - name: "STEP 6.1: Create tnsnames.ora (STANDBY)"
+      copy:
+        dest: "{{ oracle_home }}/network/admin/tnsnames.ora"
+        content: |
+          ORCL =
+            (DESCRIPTION =
+              (ADDRESS = (PROTOCOL = TCP)(HOST = 192.168.1.195)(PORT = {{ listener_port }}))
+              (CONNECT_DATA = (SID = {{ oracle_sid }})))
+
+          ORCL_STBY =
+            (DESCRIPTION =
+              (ADDRESS = (PROTOCOL = TCP)(HOST = {{ server_ip }})(PORT = {{ listener_port }}))
+              (CONNECT_DATA = (SID = {{ oracle_sid }})))
+        owner: oracle
+        group: oinstall
+      tags: [network]
+
     - name: "STEP 6.2: Open firewall"
       firewalld:
         port: "{{ listener_port }}/tcp"
@@ -533,8 +560,32 @@
         state: enabled
         immediate: yes
       tags: [network]
+
     # ==========================================
-    # STEP 8: Auto-start
+    # STEP 7: Tạo init file tối thiểu cho NOMOUNT
+    # RMAN duplicate cần instance có thể start NOMOUNT
+    # ==========================================
+    - name: "STEP 7: Detect homes dbs path"
+      shell: |
+        find {{ oracle_base }}/homes -maxdepth 3 -name "dbs" -type d 2>/dev/null | head -1 || \
+        echo "{{ oracle_home }}/dbs"
+      register: homes_dbs_path
+      changed_when: false
+      tags: [nomount_prep]
+
+    - name: "STEP 7: Create minimal init.ora for NOMOUNT"
+      copy:
+        dest: "{{ oracle_home }}/dbs/init{{ oracle_sid }}.ora"
+        content: |
+          DB_NAME={{ oracle_sid }}
+          DB_UNIQUE_NAME={{ oracle_unique_name }}
+        owner: oracle
+        group: oinstall
+        force: no          # Không ghi đè nếu đã có (sau RMAN duplicate)
+      tags: [nomount_prep]
+
+    # ==========================================
+    # STEP 8: Auto-start setup
     # ==========================================
     - name: "STEP 8.1: Disable SELinux"
       selinux:
@@ -542,18 +593,14 @@
         policy: targeted
       tags: [autostart]
 
-    # BUG FIX: Original STEP 8.2 used recurse: yes on $ORACLE_HOME/bin
-    # which wiped the suid bit from oradism (root-owned, mode 4710).
-    # After chmod 755 recurse, oradism loses suid => ORA-12791 on every boot.
-    # Fix: only set 755 on the bin directory itself, not recursively.
-    # oradism permission is handled separately in STEP 4.4.
+    # [FIX-6] Không recurse để bảo toàn suid oradism
     - name: "STEP 8.2: Set bin dir permission (no recurse)"
       file:
         path: "{{ oracle_home }}/bin"
         mode: '0755'
       tags: [autostart]
 
-    - name: "STEP 8.2: Re-fix oradism suid after any permission changes"
+    - name: "STEP 8.2: Re-fix oradism suid"
       file:
         path: "{{ oracle_home }}/bin/oradism"
         owner: root
@@ -568,16 +615,13 @@
         line: "{{ oracle_sid }}:{{ oracle_home }}:Y"
       tags: [autostart]
 
-    # BUG FIX: Original service used User=oracle which prevents oradism
-    # from getting root privileges needed to allocate SGA (ORA-12791).
-    # Fix: run service as root, dbstart/dbshut internally su to oracle.
-    # Also added memlock limits to prevent SGA allocation warnings.
+    # [FIX-7] Service chạy as root
     - name: "STEP 8.5: Create systemd service"
       copy:
         dest: /etc/systemd/system/oracle-db.service
         content: |
           [Unit]
-          Description=Oracle Database 21c
+          Description=Oracle Database 21c (Standby)
           After=network.target
 
           [Service]
@@ -595,13 +639,34 @@
           WantedBy=multi-user.target
       tags: [autostart]
 
-    - name: "STEP 8.6: Enable service"
+    - name: "STEP 8.6: Enable service (chưa start — chưa có DB)"
       systemd:
         name: oracle-db
         enabled: yes
-        state: started
         daemon_reload: yes
       tags: [autostart]
+
+    # ==========================================
+    # [FIX-4] Set DG_BROKER_CONFIG_FILE đúng path
+    # Cần set trong pfile tối thiểu vì DB chưa có SPFILE
+    # Sau RMAN duplicate broker config path sẽ được giữ lại trong SPFILE mới
+    # ==========================================
+    - name: "STEP 9: Detect homes dbs path cho broker config"
+      shell: |
+        find {{ oracle_base }}/homes -maxdepth 3 -name "dbs" -type d 2>/dev/null | head -1 || \
+        echo "{{ oracle_home }}/dbs"
+      register: broker_dbs_path
+      changed_when: false
+      tags: [dg_prep]
+
+    - name: "STEP 9: Append DG broker config path vào init.ora"
+      blockinfile:
+        path: "{{ oracle_home }}/dbs/init{{ oracle_sid }}.ora"
+        marker: "# {mark} ANSIBLE MANAGED - DG Broker"
+        block: |
+          DG_BROKER_CONFIG_FILE1={{ broker_dbs_path.stdout }}/dr1{{ oracle_sid }}.dat
+          DG_BROKER_CONFIG_FILE2={{ broker_dbs_path.stdout }}/dr2{{ oracle_sid }}.dat
+      tags: [dg_prep]
 
     # ==========================================
     # FINAL: Summary
@@ -610,19 +675,20 @@
       debug:
         msg:
           - "=========================================="
-          - "Oracle Database 21c - INSTALLATION COMPLETE"
+          - "Oracle 21c STANDBY - SOFTWARE INSTALL XONG"
           - "=========================================="
+          - "Server IP    : {{ server_ip }}"
+          - "Hostname     : {{ hostname_fqdn }}"
+          - "DB_UNIQUE    : {{ oracle_unique_name }}"
+          - "SID          : {{ oracle_sid }}"
+          - "Listener     : {{ listener_port }}"
+          - "FRA dir      : {{ fra_dest }}"
           - ""
-          - "Connection: {{ server_ip }}:{{ listener_port }}"
-          - "CDB: {{ oracle_sid }}"
-          - "PDB: {{ pdb_name | lower }}"
+          - "Chú ý: CHƯA có database — sẽ được tạo bởi RMAN"
           - ""
-          - "User: {{ db_username }}"
-          - "Pass: {{ db_user_password }}"
-          - ""
-          - "SYS: {{ sys_password }} (SYSDBA)"
-          - ""
-          - "Connection String:"
-          - "{{ db_username }}/{{ db_user_password }}@{{ server_ip }}:{{ listener_port }}/{{ pdb_name | lower }}"
-          - ""
+          - "Bước tiếp theo (trên Primary 192.168.1.195):"
+          - "  ansible-playbook setup_primary.yml"
+          - "Sau đó trên server này:"
+          - "  ansible-playbook setup_standby.yml"
+          - "=========================================="
       tags: [always]

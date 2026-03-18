@@ -1,12 +1,18 @@
 # setup_standby.yml
-# Cấu hình Data Guard - STANDBY
-# Theo hướng dẫn: Step 3 + Step 4
+# Cấu hình Data Guard - STANDBY (192.168.1.196)
 #
-# Chạy trên Standby (192.168.1.196):
-#   ansible-playbook setup_standby.yml
-#
-# Yêu cầu: setup_primary.yml đã chạy xong trên Primary
+# Yêu cầu: setup_primary.yml đã chạy xong trên Primary (192.168.1.195)
 # Sau khi xong → quay lại Primary chạy: ansible-playbook setup_primary.yml --tags broker
+#
+# Fixes so với bản gốc:
+# [FIX-1] listener.ora STANDBY dùng ORCL_STBY và ORCL_STBY_DGMGRL (không phải ORCL/ORCL_DGMGRL)
+#         → Broker build đúng StaticConnectIdentifier cho standby
+# [FIX-2] FRA directory tạo trước khi RMAN chạy
+# [FIX-3] STARTUP NOMOUNT kiểm tra trạng thái DB trước khi gọi
+#         → Tránh fail nếu DB đang MOUNT/OPEN (chạy lại playbook lần 2)
+# [FIX-4] DG_BROKER_CONFIG_FILE set đúng path sau RMAN duplicate
+# [FIX-5] Add Standby Redo Logs trên Standby sau khi duplicate xong
+# [FIX-6] Reload listener sau khi RMAN xong để đăng ký service mới
 ---
 - name: Setup Oracle Data Guard - Standby
   hosts: localhost
@@ -66,7 +72,11 @@
               (CONNECT_DATA = (SID = {{ oracle_sid }})))
       tags: [network]
 
-    - name: "STEP2: Configure listener.ora"
+    # [FIX-1] listener.ora STANDBY:
+    # GLOBAL_DBNAME phải là ORCL_STBY và ORCL_STBY_DGMGRL (không phải ORCL/ORCL_DGMGRL)
+    # Đây là lý do StaticConnectIdentifier trong Broker bị trỏ về IP Primary
+    # Broker tự build StaticConnectIdentifier dựa trên hostname + service name từ listener
+    - name: "STEP2: Configure listener.ora (STANDBY)"
       copy:
         dest: "{{ oracle_home }}/network/admin/listener.ora"
         owner: oracle
@@ -81,7 +91,12 @@
           SID_LIST_LISTENER =
             (SID_LIST =
               (SID_DESC =
-                (GLOBAL_DBNAME = {{ oracle_sid }})
+                (GLOBAL_DBNAME = {{ standby_unique_name }})
+                (ORACLE_HOME = {{ oracle_home }})
+                (SID_NAME = {{ oracle_sid }})
+              )
+              (SID_DESC =
+                (GLOBAL_DBNAME = {{ standby_unique_name }}_DGMGRL)
                 (ORACLE_HOME = {{ oracle_home }})
                 (SID_NAME = {{ oracle_sid }})
               )
@@ -89,17 +104,27 @@
       register: listener_changed
       tags: [network]
 
-    - name: "STEP2: Reload listener"
+    - name: "STEP2: Restart listener (full restart để load config mới)"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} PATH={{ oracle_home }}/bin:$PATH
-        lsnrctl reload
-      when: listener_changed.changed
+        lsnrctl stop || true
+        sleep 3
+        lsnrctl start
       tags: [network]
+
+    # [FIX-2] Tạo FRA directory trước khi RMAN dùng
+    - name: "STEP2: Create FRA directory"
+      file:
+        path: "{{ fra_dest }}"
+        state: directory
+        owner: oracle
+        group: oinstall
+        mode: '0755'
+      tags: [network, rman]
 
     # ==========================================
     # STEP 3: Duplicate sang Standby bằng RMAN
-    # Idempotent: skip nếu đã là Physical Standby
     # ==========================================
     - name: "STEP3: Check DB role hiện tại"
       become_user: oracle
@@ -116,10 +141,40 @@
 
     - name: "STEP3: Show DB role"
       debug:
-        msg: "DB role: {{ db_role.stdout | trim }} — {{ 'SKIP RMAN' if 'PHYSICAL STANDBY' in db_role.stdout else 'Cần RMAN duplicate' }}"
+        msg: "DB role: '{{ db_role.stdout | trim }}' — {{ 'SKIP RMAN (đã là Standby)' if 'PHYSICAL STANDBY' in db_role.stdout else 'Sẽ chạy RMAN duplicate' }}"
       tags: [rman]
 
-    - name: "STEP3: Startup NOMOUNT (nếu chưa là Standby)"
+    # [FIX-3] Kiểm tra trạng thái DB trước khi STARTUP NOMOUNT
+    # Tránh lỗi ORA-01081 nếu DB đang ở trạng thái khác
+    - name: "STEP3: Check instance status"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF
+        SELECT STATUS FROM V$INSTANCE;
+        EOF
+      register: instance_status
+      failed_when: false
+      changed_when: false
+      when: "'PHYSICAL STANDBY' not in db_role.stdout"
+      tags: [rman]
+
+    - name: "STEP3: Shutdown nếu DB đang MOUNT/OPEN (để về NOMOUNT)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SHUTDOWN ABORT;
+        EOF
+      when:
+        - "'PHYSICAL STANDBY' not in db_role.stdout"
+        - instance_status is defined
+        - "'MOUNTED' in instance_status.stdout or 'OPEN' in instance_status.stdout"
+      failed_when: false
+      tags: [rman]
+
+    - name: "STEP3: Startup NOMOUNT"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
@@ -148,7 +203,7 @@
             SET FAL_SERVER='{{ oracle_unique_name }}'
             SET FAL_CLIENT='{{ standby_unique_name }}'
             SET STANDBY_FILE_MANAGEMENT='AUTO'
-            SET DG_BROKER_START='TRUE'
+            SET DG_BROKER_START='FALSE'
           NOFILENAMECHECK;
         EXIT;
         RMANEOF
@@ -157,13 +212,13 @@
       poll: 30
       tags: [rman]
 
-    - name: "STEP3: Verify Standby role"
+    - name: "STEP3: Verify Standby role sau duplicate"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
         sqlplus -s / as sysdba << 'EOF'
         SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF
-        SELECT DATABASE_ROLE, DB_UNIQUE_NAME FROM V$DATABASE;
+        SELECT DATABASE_ROLE, DB_UNIQUE_NAME, OPEN_MODE FROM V$DATABASE;
         EOF
       register: role_verify
       changed_when: false
@@ -175,18 +230,96 @@
       tags: [rman]
 
     # ==========================================
-    # STEP 4: Enable DG Broker trên Standby
+    # [FIX-4] Set DG_BROKER_CONFIG_FILE đúng path TRƯỚC khi bật broker
     # ==========================================
-    - name: "STEP4: Enable DG Broker + MRP"
+    - name: "STEP4: Detect broker config file path trên Standby"
+      shell: |
+        HOMES_DBS=$(find {{ oracle_base }}/homes -maxdepth 3 -name "dbs" -type d 2>/dev/null | head -1)
+        echo "${HOMES_DBS:-{{ oracle_home }}/dbs}"
+      register: broker_dbs_path
+      changed_when: false
+      tags: [broker]
+
+    - name: "STEP4: Show broker config path"
+      debug:
+        msg: "Broker config path: {{ broker_dbs_path.stdout }}"
+      tags: [broker]
+
+    - name: "STEP4: Set DG_BROKER_CONFIG_FILE trong SPFILE của Standby"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << EOF
+        ALTER SYSTEM SET DG_BROKER_CONFIG_FILE1='{{ broker_dbs_path.stdout }}/dr1{{ oracle_sid }}.dat' SCOPE=SPFILE;
+        ALTER SYSTEM SET DG_BROKER_CONFIG_FILE2='{{ broker_dbs_path.stdout }}/dr2{{ oracle_sid }}.dat' SCOPE=SPFILE;
+        EOF
+      tags: [broker]
+
+    # ==========================================
+    # [FIX-5] Add Standby Redo Logs trên Standby
+    # Cần thiết để tránh ORA-16789 sau khi duplicate
+    # ==========================================
+    - name: "STEP4: Check SRL trên Standby"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF
+        SELECT COUNT(*) FROM V$LOGFILE WHERE TYPE='STANDBY';
+        EOF
+      register: stby_srl_count
+      changed_when: false
+      tags: [broker]
+
+    - name: "STEP4: Add Standby Redo Logs trên Standby (nếu chưa có)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 10 SIZE 50M;
+        ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 11 SIZE 50M;
+        ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 12 SIZE 50M;
+        ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 13 SIZE 50M;
+        EOF
+      when: "'0' in stby_srl_count.stdout"
+      failed_when: false
+      tags: [broker]
+
+    # ==========================================
+    # STEP 4: Enable DG Broker + MRP
+    # ==========================================
+    - name: "STEP4: Enable DG Broker trên Standby"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
         sqlplus -s / as sysdba << 'EOF'
         ALTER SYSTEM SET DG_BROKER_START=TRUE SCOPE=BOTH;
+        EOF
+      tags: [broker]
+
+    - name: "STEP4: Start MRP (Managed Recovery Process)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
         ALTER DATABASE RECOVER MANAGED STANDBY DATABASE
           USING CURRENT LOGFILE DISCONNECT FROM SESSION;
         EOF
       failed_when: false
+      tags: [broker]
+
+    # [FIX-6] Reload listener sau khi RMAN xong
+    # DB đã có service mới (ORCL_STBY), listener cần đăng ký lại
+    - name: "STEP4: Reload listener để đăng ký service mới"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} PATH={{ oracle_home }}/bin:$PATH
+        lsnrctl reload
+      tags: [broker]
+
+    - name: "STEP4: Wait for broker và MRP khởi động"
+      pause:
+        seconds: 20
       tags: [broker]
 
     - name: "STEP4: Verify Standby status"
@@ -214,6 +347,8 @@
           - "====================================="
           - "STANDBY SETUP HOÀN TẤT"
           - "====================================="
+          - "Standby: {{ standby_unique_name }} @ {{ standby_ip }}"
+          - ""
           - "Bước tiếp theo - Trên Primary ({{ primary_ip }}):"
           - "  ansible-playbook setup_primary.yml --tags broker"
           - "====================================="

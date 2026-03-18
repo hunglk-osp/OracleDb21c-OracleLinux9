@@ -1,10 +1,15 @@
-# install_oracle21c_FINAL.yml
-# Oracle Database 21c on Oracle Linux 9 - FINAL VERSION
-# Bug fixed: DBCA condition now checks for ORA errors properly
-# Bug fixed: oradism suid bit preserved (was wiped by STEP 8.2 recurse)
-# Bug fixed: systemd service runs as root to allow oradism to work
+# install_oracle21c_primary.yml
+# Oracle Database 21c on Oracle Linux 9 - PRIMARY SERVER
+# Dùng cho server: 192.168.1.195
+#
+# Fixes so với bản gốc:
+# [FIX-1] listener.ora thêm ORCL_DGMGRL entry (bắt buộc cho Data Guard Broker)
+# [FIX-2] Sau install set DG_BROKER_CONFIG_FILE đúng path (Oracle 21c read-only home)
+# [FIX-3] hostname/IP riêng biệt với standby
+# [FIX-4] oradism suid bit preserved
+# [FIX-5] systemd service chạy as root để oradism hoạt động đúng
 ---
-- name: Install Oracle Database 21c on Oracle Linux 9
+- name: Install Oracle Database 21c on Oracle Linux 9 - PRIMARY
   hosts: localhost
   connection: local
   become: yes
@@ -13,6 +18,7 @@
     oracle_home: /u01/app/oracle/product/21c/dbhome_1
     oracle_inventory: /u01/app/oraInventory
     oracle_sid: ORCL
+    oracle_unique_name: ORCL                          # DB_UNIQUE_NAME của primary
     db_global_name: ORCL
     pdb_name: ORCLPDB1
     sys_password: "Oracle_4U"
@@ -20,8 +26,8 @@
     pdb_admin_password: "Oracle_4U"
     db_username: chirag
     db_user_password: "Tiger123"
-    hostname_fqdn: oracledb.local
-    hostname_short: oracledb
+    hostname_fqdn: primarydb.local                   # [FIX-3] Khác với standby
+    hostname_short: primarydb
     listener_port: 1521
     total_memory: 2048
     zip_file_local: "./LINUX.X64_213000_db_home.zip"
@@ -110,12 +116,12 @@
         state: present
       loop:
         - { name: oinstall, gid: 54321 }
-        - { name: dba, gid: 54322 }
-        - { name: oper, gid: 54323 }
-        - { name: backupdba, gid: 54324 }
-        - { name: dgdba, gid: 54325 }
-        - { name: kmdba, gid: 54326 }
-        - { name: racdba, gid: 54327 }
+        - { name: dba,      gid: 54322 }
+        - { name: oper,     gid: 54323 }
+        - { name: backupdba,gid: 54324 }
+        - { name: dgdba,    gid: 54325 }
+        - { name: kmdba,    gid: 54326 }
+        - { name: racdba,   gid: 54327 }
       tags: [os_prep]
 
     - name: "STEP 1.2.1: Ensure oracle user"
@@ -449,12 +455,7 @@
       when: rootsh.stat.exists
       tags: [install]
 
-    # ==========================================
-    # STEP 4.4: Fix oradism permission
-    # BUG FIX: root.sh sets suid on oradism, but STEP 4.1.5 (recurse ownership)
-    # may run AFTER root.sh and wipe the suid bit, causing ORA-12791 on startup.
-    # Always re-apply correct oradism permission after root.sh.
-    # ==========================================
+    # [FIX-4] oradism suid bit - phải set sau root.sh, không để recurse chown xóa mất
     - name: "STEP 4.4: Fix oradism suid permission"
       file:
         path: "{{ oracle_home }}/bin/oradism"
@@ -467,17 +468,17 @@
     # STEP 5: Listener & Database
     # ==========================================
     - name: "STEP 5.1: Check listener"
+      become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }}
         export PATH=$ORACLE_HOME/bin:$PATH
         lsnrctl status
-      become_user: oracle
       register: listener_status
       failed_when: false
       changed_when: false
       tags: [listener]
 
-    - name: "STEP 5.1: Create listener"
+    - name: "STEP 5.1: Create listener via netca"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }}
@@ -486,7 +487,9 @@
       when: "'TNS-12541' in listener_status.stderr or 'TNS-01106' in listener_status.stderr"
       tags: [listener]
 
-    - name: "STEP 5.3: Create listener.ora"
+    # [FIX-1] listener.ora PRIMARY: thêm ORCL_DGMGRL entry
+    # Broker dùng SERVICE_NAME=<sid>_DGMGRL để kết nối static khi DB chưa open
+    - name: "STEP 5.3: Create listener.ora (PRIMARY)"
       copy:
         dest: "{{ oracle_home }}/network/admin/listener.ora"
         content: |
@@ -524,10 +527,6 @@
         lsnrctl start
       tags: [listener]
 
-    # BUG FIX: Không dùng sqlplus để check vì DB có thể đã tạo nhưng chưa start
-    # (idle instance) => sqlplus trả ORA-01034 => condition = true => DBCA chạy => FATAL SID exists.
-    # Fix: check trực tiếp sự tồn tại của datafile system01.dbf trên filesystem.
-    # Nếu file tồn tại = DB đã tạo rồi => skip DBCA.
     - name: "STEP 5.4: Check DB datafile exists"
       stat:
         path: "{{ oracle_base }}/oradata/{{ oracle_sid }}/system01.dbf"
@@ -541,7 +540,7 @@
           - "{{ 'DB already created - skipping DBCA' if db_datafile.stat.exists else 'DB not found - will run DBCA' }}"
       tags: [database]
 
-    - name: "STEP 5.4: Create DB (15-30 min)"
+    - name: "STEP 5.4: Create DB via DBCA (15-30 min)"
       become_user: oracle
       shell: |
         export CV_ASSUME_DISTID={{ cv_assume_distid }}
@@ -586,7 +585,7 @@
       tags: [database]
 
     # ==========================================
-    # STEP 6: Network
+    # STEP 6: Network (tnsnames)
     # ==========================================
     - name: "STEP 6.1: Create tnsnames.ora"
       copy:
@@ -676,7 +675,7 @@
         msg: "{{ lsnr_status.stdout_lines }}"
       tags: [database, register]
 
-    - name: "STEP 7.5: Create user"
+    - name: "STEP 7.5: Create app user"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }}
@@ -721,18 +720,14 @@
         policy: targeted
       tags: [autostart]
 
-    # BUG FIX: Original STEP 8.2 used recurse: yes on $ORACLE_HOME/bin
-    # which wiped the suid bit from oradism (root-owned, mode 4710).
-    # After chmod 755 recurse, oradism loses suid => ORA-12791 on every boot.
-    # Fix: only set 755 on the bin directory itself, not recursively.
-    # oradism permission is handled separately in STEP 4.4.
+    # [FIX-4] Chỉ set permission thư mục bin, KHÔNG recurse để tránh xóa suid oradism
     - name: "STEP 8.2: Set bin dir permission (no recurse)"
       file:
         path: "{{ oracle_home }}/bin"
         mode: '0755'
       tags: [autostart]
 
-    - name: "STEP 8.2: Re-fix oradism suid after any permission changes"
+    - name: "STEP 8.2: Re-fix oradism suid"
       file:
         path: "{{ oracle_home }}/bin/oradism"
         owner: root
@@ -759,10 +754,7 @@
         EOF
       tags: [autostart]
 
-    # BUG FIX: Original service used User=oracle which prevents oradism
-    # from getting root privileges needed to allocate SGA (ORA-12791).
-    # Fix: run service as root, dbstart/dbshut internally su to oracle.
-    # Also added memlock limits to prevent SGA allocation warnings.
+    # [FIX-5] Service chạy as root để oradism có quyền cấp phát SGA
     - name: "STEP 8.5: Create systemd service"
       copy:
         dest: /etc/systemd/system/oracle-db.service
@@ -795,25 +787,67 @@
       tags: [autostart]
 
     # ==========================================
+    # [FIX-2] Set DG_BROKER_CONFIG_FILE đúng path
+    # Oracle 21c dùng read-only ORACLE_HOME, broker config file nằm ở
+    # $ORACLE_BASE/homes/<home_name>/dbs/ KHÔNG phải $ORACLE_HOME/dbs/
+    # Phải set đúng path trước khi setup_primary.yml bật DG_BROKER_START
+    # ==========================================
+    - name: "STEP 9: Detect actual dbs path cho broker config"
+      shell: |
+        find {{ oracle_base }}/homes -name "dr1{{ oracle_sid }}.dat" 2>/dev/null | head -1 | xargs dirname || \
+        echo "{{ oracle_home }}/dbs"
+      register: broker_dbs_path
+      changed_when: false
+      tags: [dg_prep]
+
+    - name: "STEP 9: Show detected broker dbs path"
+      debug:
+        msg: "Broker config path: {{ broker_dbs_path.stdout }}"
+      tags: [dg_prep]
+
+    - name: "STEP 9: Set DG_BROKER_CONFIG_FILE trong SPFILE"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        # Detect đúng path: ưu tiên homes path (Oracle 21c read-only home), fallback về ORACLE_HOME/dbs
+        HOMES_PATH=$(find {{ oracle_base }}/homes -maxdepth 3 -name "dbs" -type d 2>/dev/null | head -1)
+        DBS_PATH=${HOMES_PATH:-{{ oracle_home }}/dbs}
+        sqlplus -s / as sysdba << EOF
+        ALTER SYSTEM SET DG_BROKER_CONFIG_FILE1='${DBS_PATH}/dr1{{ oracle_sid }}.dat' SCOPE=SPFILE;
+        ALTER SYSTEM SET DG_BROKER_CONFIG_FILE2='${DBS_PATH}/dr2{{ oracle_sid }}.dat' SCOPE=SPFILE;
+        EOF
+      tags: [dg_prep]
+
+    - name: "STEP 9: Set DB_UNIQUE_NAME cho Primary"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        ALTER SYSTEM SET DB_UNIQUE_NAME='{{ oracle_unique_name }}' SCOPE=SPFILE;
+        EOF
+      tags: [dg_prep]
+
+    # ==========================================
     # FINAL: Summary
     # ==========================================
     - name: "Installation Summary"
       debug:
         msg:
           - "=========================================="
-          - "Oracle Database 21c - INSTALLATION COMPLETE"
+          - "Oracle Database 21c PRIMARY - INSTALL XONG"
           - "=========================================="
+          - "Server IP : {{ server_ip }}"
+          - "Hostname  : {{ hostname_fqdn }}"
+          - "CDB SID   : {{ oracle_sid }}"
+          - "DB_UNIQUE : {{ oracle_unique_name }}"
+          - "PDB       : {{ pdb_name | lower }}"
+          - "User      : {{ db_username }} / {{ db_user_password }}"
+          - "SYS       : {{ sys_password }}"
           - ""
-          - "Connection: {{ server_ip }}:{{ listener_port }}"
-          - "CDB: {{ oracle_sid }}"
-          - "PDB: {{ pdb_name | lower }}"
-          - ""
-          - "User: {{ db_username }}"
-          - "Pass: {{ db_user_password }}"
-          - ""
-          - "SYS: {{ sys_password }} (SYSDBA)"
-          - ""
-          - "Connection String:"
-          - "{{ db_username }}/{{ db_user_password }}@{{ server_ip }}:{{ listener_port }}/{{ pdb_name | lower }}"
-          - ""
+          - "Bước tiếp theo:"
+          - "  1. Chạy setup_primary.yml trên server này"
+          - "  2. Chạy install_oracle21c_standby.yml trên 192.168.1.196"
+          - "  3. Chạy setup_standby.yml trên 192.168.1.196"
+          - "  4. Chạy setup_primary.yml --tags broker trên server này"
+          - "=========================================="
       tags: [always]

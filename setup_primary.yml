@@ -1,12 +1,18 @@
 # setup_primary.yml
-# Cấu hình Data Guard - PRIMARY
-# Theo hướng dẫn: Step 1 + Step 2 + Step 4
+# Cấu hình Data Guard - PRIMARY (192.168.1.195)
 #
-# Chạy trên Primary (192.168.1.195):
-#   ansible-playbook setup_primary.yml
+# Workflow:
+#   Bước 1: ansible-playbook setup_primary.yml          ← chạy trên 195
+#   Bước 2: ansible-playbook setup_standby.yml           ← chạy trên 196
+#   Bước 3: ansible-playbook setup_primary.yml --tags broker  ← chạy trên 195
 #
-# Sau khi xong → chạy setup_standby.yml trên 192.168.1.196
-# Sau khi standby xong → chạy lại: ansible-playbook setup_primary.yml --tags broker
+# Fixes so với bản gốc:
+# [FIX-1] listener.ora thêm ORCL_DGMGRL static entry cho Broker
+# [FIX-2] DG_BROKER_CONFIG_FILE set đúng path Oracle 21c read-only home
+#         trước khi DG_BROKER_START=TRUE
+# [FIX-3] Password file copy từ đúng path (tự detect)
+# [FIX-4] broker_check condition bắt thêm ORA-16525 (broker chưa start kịp)
+# [FIX-5] SHOW CONFIGURATION chạy sau khi broker ổn định hơn (wait 30s)
 ---
 - name: Setup Oracle Data Guard - Primary
   hosts: localhost
@@ -59,7 +65,7 @@
     # ==========================================
     # STEP 1: Prepare Primary Database
     # ==========================================
-    - name: "STEP1: Enable Archivelog Mode"
+    - name: "STEP1: Check Archivelog Mode"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
@@ -85,7 +91,7 @@
       when: "'NOARCHIVELOG' in log_mode.stdout"
       tags: [prepare]
 
-    - name: "STEP1: Enable Force Logging"
+    - name: "STEP1: Enable Force Logging và Flashback"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
@@ -97,7 +103,7 @@
       failed_when: false
       tags: [prepare]
 
-    - name: "STEP1: Create Standby Redo Logs"
+    - name: "STEP1: Check Standby Redo Logs"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
@@ -118,7 +124,7 @@
         ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 11 SIZE 50M;
         ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 12 SIZE 50M;
         ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 13 SIZE 50M;
-        ALTER SYSTEM SET STANDBY_FILE_MANAGEMENT=AUTO;
+        ALTER SYSTEM SET STANDBY_FILE_MANAGEMENT=AUTO SCOPE=BOTH;
         EOF
       when: "'0' in srl_count.stdout"
       tags: [prepare]
@@ -147,7 +153,9 @@
               (CONNECT_DATA = (SID = {{ oracle_sid }})))
       tags: [network]
 
-    - name: "STEP2: Configure listener.ora"
+    # [FIX-1] Thêm ORCL_DGMGRL vào SID_LIST_LISTENER
+    # Broker dùng static entry này khi primary DB chưa fully open
+    - name: "STEP2: Configure listener.ora (PRIMARY)"
       copy:
         dest: "{{ oracle_home }}/network/admin/listener.ora"
         owner: oracle
@@ -166,6 +174,11 @@
                 (ORACLE_HOME = {{ oracle_home }})
                 (SID_NAME = {{ oracle_sid }})
               )
+              (SID_DESC =
+                (GLOBAL_DBNAME = {{ oracle_sid }}_DGMGRL)
+                (ORACLE_HOME = {{ oracle_home }})
+                (SID_NAME = {{ oracle_sid }})
+              )
             )
       register: listener_changed
       tags: [network]
@@ -179,12 +192,66 @@
       tags: [network]
 
     # ==========================================
-    # Copy Password File sang Standby
+    # [FIX-2] Set DG_BROKER_CONFIG_FILE TRƯỚC khi bật broker
+    # Oracle 21c read-only home: broker file nằm ở homes path, không phải ORACLE_HOME/dbs
     # ==========================================
+    - name: "STEP3: Detect broker config file path"
+      shell: |
+        # Tìm file dr1ORCL.dat nếu đã tồn tại (DB đã chạy trước)
+        EXISTING=$(find {{ oracle_base }}/homes -name "dr1{{ oracle_sid }}.dat" 2>/dev/null | head -1 | xargs dirname 2>/dev/null)
+        if [ -n "$EXISTING" ]; then
+          echo "$EXISTING"
+        else
+          # Detect homes/dbs directory
+          HOMES_DBS=$(find {{ oracle_base }}/homes -maxdepth 3 -name "dbs" -type d 2>/dev/null | head -1)
+          echo "${HOMES_DBS:-{{ oracle_home }}/dbs}"
+        fi
+      register: broker_dbs_path
+      changed_when: false
+      tags: [prepare, broker]
+
+    - name: "STEP3: Show broker config path"
+      debug:
+        msg: "DG Broker config path: {{ broker_dbs_path.stdout }}"
+      tags: [prepare, broker]
+
+    - name: "STEP3: Set DG_BROKER_CONFIG_FILE trong SPFILE"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << EOF
+        ALTER SYSTEM SET DG_BROKER_CONFIG_FILE1='{{ broker_dbs_path.stdout }}/dr1{{ oracle_sid }}.dat' SCOPE=SPFILE;
+        ALTER SYSTEM SET DG_BROKER_CONFIG_FILE2='{{ broker_dbs_path.stdout }}/dr2{{ oracle_sid }}.dat' SCOPE=SPFILE;
+        EOF
+      tags: [prepare, broker]
+
+    # ==========================================
+    # Copy Password File sang Standby
+    # [FIX-3] Tự detect đúng path password file
+    # ==========================================
+    - name: "PWD: Detect password file path"
+      shell: |
+        # Oracle 21c có thể để pwfile ở homes/dbs hoặc ORACLE_HOME/dbs
+        HOMES_PWD=$(find {{ oracle_base }}/homes -name "orapw{{ oracle_sid }}" 2>/dev/null | head -1)
+        LEGACY_PWD="{{ oracle_home }}/dbs/orapw{{ oracle_sid }}"
+        BASE_PWD="{{ oracle_base }}/dbs/orapw{{ oracle_sid }}"
+        if [ -f "$HOMES_PWD" ]; then echo "$HOMES_PWD"
+        elif [ -f "$LEGACY_PWD" ]; then echo "$LEGACY_PWD"
+        else echo "$BASE_PWD"
+        fi
+      register: pwdfile_path
+      changed_when: false
+      tags: [pwdfile]
+
+    - name: "PWD: Show password file path"
+      debug:
+        msg: "Password file: {{ pwdfile_path.stdout }}"
+      tags: [pwdfile]
+
     - name: "PWD: Copy password file sang Standby"
       shell: |
         scp -o StrictHostKeyChecking=no \
-          {{ oracle_base }}/dbs/orapw{{ oracle_sid }} \
+          {{ pwdfile_path.stdout }} \
           root@{{ standby_ip }}:{{ oracle_base }}/dbs/orapw{{ oracle_sid }}
         ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} \
           "chown oracle:oinstall {{ oracle_base }}/dbs/orapw{{ oracle_sid }}"
@@ -192,20 +259,39 @@
 
     # ==========================================
     # STEP 4: Enable Data Guard Broker
+    # Chạy SAU khi đã set DG_BROKER_CONFIG_FILE
     # ==========================================
+    - name: "STEP4: Restart DB để áp dụng SPFILE changes (broker config path)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SHUTDOWN IMMEDIATE;
+        STARTUP;
+        ALTER PLUGGABLE DATABASE ALL OPEN;
+        EOF
+      tags: [prepare, broker]
+
     - name: "STEP4: Enable DG Broker trên Primary"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
         sqlplus -s / as sysdba << 'EOF'
-        ALTER SYSTEM SET DG_BROKER_START=TRUE;
+        ALTER SYSTEM SET DG_BROKER_START=TRUE SCOPE=BOTH;
         EOF
+      tags: [broker]
+
+    - name: "STEP4: Wait for Broker process to start"
+      pause:
+        seconds: 15
       tags: [broker]
 
     # ==========================================
     # STEP 5: Configure DG Broker
-    # Chỉ chạy sau khi setup_standby.yml xong
+    # Chỉ chạy sau khi setup_standby.yml xong (--tags broker)
     # ==========================================
+
+    # [FIX-4] Check cả ORA-16532 (config không tồn tại) và ORA-16525 (broker chưa ready)
     - name: "STEP5: Check Broker config tồn tại chưa"
       become_user: oracle
       shell: |
@@ -219,7 +305,33 @@
       changed_when: false
       tags: [broker]
 
-    - name: "STEP5: Create Broker Configuration"
+    - name: "STEP5: Debug broker check"
+      debug:
+        msg: "{{ broker_check.stdout_lines }}"
+      tags: [broker]
+
+    # Nếu broker chưa ready (ORA-16525), chờ thêm rồi thử lại
+    - name: "STEP5: Wait thêm nếu broker chưa ready (ORA-16525)"
+      pause:
+        seconds: 30
+      when: "'ORA-16525' in broker_check.stdout"
+      tags: [broker]
+
+    - name: "STEP5: Re-check sau khi chờ"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        dgmgrl / << 'EOF'
+        SHOW CONFIGURATION;
+        EXIT;
+        EOF
+      register: broker_check
+      failed_when: false
+      changed_when: false
+      when: "'ORA-16525' in broker_check.stdout"
+      tags: [broker]
+
+    - name: "STEP5: Create Broker Configuration (nếu chưa có)"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
@@ -261,9 +373,10 @@
         'ORA-16532' in stby_check.stdout
       tags: [broker]
 
-    - name: "STEP5: Wait for Broker"
+    # [FIX-5] Chờ broker ổn định hơn trước khi SHOW
+    - name: "STEP5: Wait for Broker to stabilize"
       pause:
-        seconds: 20
+        seconds: 30
       tags: [broker]
 
     - name: "STEP5: SHOW CONFIGURATION"
@@ -291,9 +404,12 @@
           - "====================================="
           - "PRIMARY SETUP HOÀN TẤT"
           - "====================================="
+          - "Primary  : {{ oracle_unique_name }} @ {{ primary_ip }}"
+          - "Standby  : {{ standby_unique_name }} @ {{ standby_ip }}"
+          - ""
           - "Workflow:"
           - "  1. setup_primary.yml       ← xong"
-          - "  2. setup_standby.yml trên 196"
+          - "  2. setup_standby.yml trên {{ standby_ip }}"
           - "  3. setup_primary.yml --tags broker"
           - "====================================="
       tags: [always]
