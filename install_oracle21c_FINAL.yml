@@ -460,7 +460,7 @@
         path: "{{ oracle_home }}/bin/oradism"
         owner: root
         group: oinstall
-        mode: '4710'
+        mode: '4750'
       tags: [install, autostart]
 
     # ==========================================
@@ -737,7 +737,7 @@
         path: "{{ oracle_home }}/bin/oradism"
         owner: root
         group: oinstall
-        mode: '4710'
+        mode: '4750'
       tags: [autostart]
 
     - name: "STEP 8.3: Configure oratab"
@@ -776,7 +776,7 @@
           Environment=ORACLE_HOME={{ oracle_home }}
           Environment=ORACLE_SID={{ oracle_sid }}
           Environment=ORACLE_BASE={{ oracle_base }}
-          ExecStartPre=/bin/bash -c 'chmod 4710 {{ oracle_home }}/bin/oradism && chown root:oinstall {{ oracle_home }}/bin/oradism'
+          ExecStartPre=/bin/bash -c 'chmod 4750 {{ oracle_home }}/bin/oradism && chown root:oinstall {{ oracle_home }}/bin/oradism'
           ExecStart={{ oracle_home }}/bin/dbstart {{ oracle_home }}
           ExecStop={{ oracle_home }}/bin/dbshut {{ oracle_home }}
           RemainAfterExit=yes
