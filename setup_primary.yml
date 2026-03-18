@@ -456,7 +456,7 @@
 
     - name: "DG-P11: Xóa LOG_ARCHIVE_DEST_2 trên Standby qua SSH"
       shell: |
-        ssh -o StrictHostKeyChecking=no root@{{ standby_ip }}           "export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:\$PATH; sqlplus -s / as sysdba @/tmp/clear_dest2.sql"
+        ssh -o StrictHostKeyChecking=no root@{{ standby_ip }}           "su - oracle -s /bin/bash -c 'ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:\$PATH {{ oracle_home }}/bin/sqlplus -s / as sysdba @/tmp/clear_dest2.sql'"
       when: >
         'was not found' in broker_stby_check.stdout or
         'ORA-16532' in broker_stby_check.stdout
