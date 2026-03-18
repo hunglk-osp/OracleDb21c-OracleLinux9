@@ -298,6 +298,38 @@
         SQLEOF
       tags: [broker]
 
+    - name: "DG-S7: Check Standby Redo Logs trên Standby"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'SQLEOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF
+        SELECT COUNT(*) FROM V$LOGFILE WHERE TYPE='STANDBY';
+        EXIT;
+        SQLEOF
+      register: srl_check_stby
+      changed_when: false
+      tags: [broker]
+
+    - name: "DG-S7: Tạo Standby Redo Logs trên Standby (nếu chưa có)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'SQLEOF'
+        ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 10 SIZE 50M;
+        ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 11 SIZE 50M;
+        ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 12 SIZE 50M;
+        ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 13 SIZE 50M;
+        EXIT;
+        SQLEOF
+      when: "'0' in srl_check_stby.stdout"
+      failed_when: false
+      tags: [broker]
+
     - name: "DG-S7: Bật MRP (Managed Recovery Process)"
       become_user: oracle
       shell: |
