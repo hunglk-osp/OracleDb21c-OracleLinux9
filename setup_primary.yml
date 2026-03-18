@@ -353,14 +353,14 @@
     - name: "DG-P10: Copy password file sang Standby qua SSH"
       shell: |
         scp -o StrictHostKeyChecking=no \
-          {{ oracle_home }}/dbs/orapw{{ oracle_sid }} \
-          root@{{ standby_ip }}:{{ oracle_home }}/dbs/orapw{{ oracle_sid }}
+          {{ oracle_base }}/dbs/orapw{{ oracle_sid }} \
+          root@{{ standby_ip }}:{{ oracle_base }}/dbs/orapw{{ oracle_sid }}
       tags: [pwdfile]
 
     - name: "DG-P10: Fix ownership password file trên Standby"
       shell: |
         ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} \
-          "chown oracle:oinstall {{ oracle_home }}/dbs/orapw{{ oracle_sid }}"
+          "chown oracle:oinstall {{ oracle_base }}/dbs/orapw{{ oracle_sid }}"
       tags: [pwdfile]
 
     # ==========================================
