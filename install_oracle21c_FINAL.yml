@@ -524,25 +524,21 @@
         lsnrctl start
       tags: [listener]
 
-    - name: "STEP 5.4: Check DB exists"
-      become_user: oracle
-      shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export ORACLE_SID={{ oracle_sid }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        echo "SELECT instance_name FROM v\$instance;" | sqlplus -s / as sysdba
-      register: db_check
-      failed_when: false
-      changed_when: false
+    # BUG FIX: Không dùng sqlplus để check vì DB có thể đã tạo nhưng chưa start
+    # (idle instance) => sqlplus trả ORA-01034 => condition = true => DBCA chạy => FATAL SID exists.
+    # Fix: check trực tiếp sự tồn tại của datafile system01.dbf trên filesystem.
+    # Nếu file tồn tại = DB đã tạo rồi => skip DBCA.
+    - name: "STEP 5.4: Check DB datafile exists"
+      stat:
+        path: "{{ oracle_base }}/oradata/{{ oracle_sid }}/system01.dbf"
+      register: db_datafile
       tags: [database]
 
     - name: "STEP 5.4: Debug DB check result"
       debug:
         msg:
-          - "db_check.rc: {{ db_check.rc }}"
-          - "db_check.stdout: {{ db_check.stdout }}"
-          - "Contains ORA-: {{ 'ORA-' in db_check.stdout }}"
-          - "Contains ORCL: {{ 'ORCL' in db_check.stdout }}"
+          - "system01.dbf exists: {{ db_datafile.stat.exists }}"
+          - "{{ 'DB already created - skipping DBCA' if db_datafile.stat.exists else 'DB not found - will run DBCA' }}"
       tags: [database]
 
     - name: "STEP 5.4: Create DB (15-30 min)"
@@ -569,12 +565,7 @@
           -characterSet AL32UTF8 \
           -sysPassword {{ sys_password }} \
           -systemPassword {{ system_password }}
-      when: >
-        db_check.rc != 0 or
-        'ORA-01034' in db_check.stdout or
-        'ORA-' in db_check.stdout or
-        'idle instance' in db_check.stdout.lower() or
-        'not available' in db_check.stdout.lower()
+      when: not db_datafile.stat.exists
       async: 3600
       poll: 30
       tags: [database]
