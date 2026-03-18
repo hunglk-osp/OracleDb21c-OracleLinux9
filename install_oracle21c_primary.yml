@@ -8,6 +8,7 @@
 # [FIX-3] hostname/IP riêng biệt với standby
 # [FIX-4] oradism suid bit preserved
 # [FIX-5] systemd service chạy as root để oradism hoạt động đúng
+# [FIX-6] Bỏ STEP 3.4 inject libnnzst.a / libjavavm.a — Oracle 21c không dùng static .a nữa
 ---
 - name: Install Oracle Database 21c on Oracle Linux 9 - PRIMARY
   hosts: localhost
@@ -461,7 +462,7 @@
         path: "{{ oracle_home }}/bin/oradism"
         owner: root
         group: oinstall
-        mode: '4710'
+        mode: '4750'
       tags: [install, autostart]
 
     # ==========================================
@@ -732,7 +733,7 @@
         path: "{{ oracle_home }}/bin/oradism"
         owner: root
         group: oinstall
-        mode: '4710'
+        mode: '4750'
       tags: [autostart]
 
     - name: "STEP 8.3: Configure oratab"
@@ -768,7 +769,7 @@
           Environment=ORACLE_HOME={{ oracle_home }}
           Environment=ORACLE_SID={{ oracle_sid }}
           Environment=ORACLE_BASE={{ oracle_base }}
-          ExecStartPre=/bin/bash -c 'chmod 4710 {{ oracle_home }}/bin/oradism && chown root:oinstall {{ oracle_home }}/bin/oradism'
+          ExecStartPre=/bin/bash -c 'chmod 4750 {{ oracle_home }}/bin/oradism && chown root:oinstall {{ oracle_home }}/bin/oradism'
           ExecStart={{ oracle_home }}/bin/dbstart {{ oracle_home }}
           ExecStop={{ oracle_home }}/bin/dbshut {{ oracle_home }}
           RemainAfterExit=yes
