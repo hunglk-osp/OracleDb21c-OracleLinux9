@@ -298,6 +298,19 @@
         SQLEOF
       tags: [broker]
 
+    - name: "DG-S7: Bật MRP (Managed Recovery Process)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'SQLEOF'
+        ALTER DATABASE RECOVER MANAGED STANDBY DATABASE USING CURRENT LOGFILE DISCONNECT FROM SESSION;
+        EXIT;
+        SQLEOF
+      failed_when: false
+      tags: [broker]
+
     - name: "DG-S7: Verify Standby role và trạng thái"
       become_user: oracle
       shell: |
