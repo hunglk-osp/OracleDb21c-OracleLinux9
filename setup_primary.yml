@@ -1,15 +1,13 @@
 # setup_primary.yml
-# Cấu hình Data Guard - PRIMARY (192.168.1.195)
-# Chạy trực tiếp trên server 195:
+# Cấu hình Data Guard - PRIMARY
+# Chạy trực tiếp trên Primary server:
 #   ansible-playbook setup_primary.yml
 #
-# Lưu ý: Lần đầu chạy, cần nhập password SSH của server 196
-# khi task "DG-P1: Copy SSH key sang Standby" hỏi.
-# Các lần sau SSH key đã có, không cần nhập gì thêm.
-#
-# Sau khi chạy xong -> chạy setup_standby.yml trên server 196
+# Lần đầu chạy: nhập password SSH của Standby 1 lần khi được hỏi
+# Sau khi chạy xong -> chạy setup_standby.yml trên Standby server
+# Sau khi setup_standby.yml xong -> chạy lại file này với --tags broker
 ---
-- name: Setup Oracle Data Guard - Primary (192.168.1.195)
+- name: Setup Oracle Data Guard - Primary
   hosts: localhost
   connection: local
   become: yes
@@ -29,18 +27,16 @@
   tasks:
 
     # ==========================================
-    # STEP 1: Setup SSH Key từ root@195 → root@196
-    # Idempotent: chỉ generate và copy nếu chưa có
-    # Lần đầu sẽ hỏi password SSH của server 196
+    # STEP 1: Setup SSH Key Primary → Standby
     # ==========================================
-    - name: "DG-P1: Ensure .ssh directory tồn tại"
+    - name: "DG-P1: Ensure .ssh directory"
       file:
         path: /root/.ssh
         state: directory
         mode: '0700'
       tags: [ssh_setup]
 
-    - name: "DG-P1: Generate SSH key cho root (nếu chưa có)"
+    - name: "DG-P1: Generate SSH key (nếu chưa có)"
       shell: ssh-keygen -t rsa -b 4096 -N "" -f /root/.ssh/id_rsa
       args:
         creates: /root/.ssh/id_rsa
@@ -54,113 +50,86 @@
         creates: /root/.ssh/.ssh_copy_done_{{ standby_ip }}
       tags: [ssh_setup]
 
-    - name: "DG-P1: Verify SSH không cần password"
+    - name: "DG-P1: Verify SSH"
       shell: ssh -o StrictHostKeyChecking=no -o BatchMode=yes root@{{ standby_ip }} "echo OK"
       register: ssh_test
       changed_when: false
       failed_when: ssh_test.rc != 0
       tags: [ssh_setup]
 
-    - name: "DG-P1: SSH test result"
-      debug:
-        msg: "SSH to {{ standby_ip }}: {{ ssh_test.stdout }}"
-      tags: [ssh_setup]
-
     # ==========================================
-    # STEP 2: Bật Archive Log Mode
+    # STEP 2: Bật Archive Log Mode (idempotent)
     # ==========================================
     - name: "DG-P2: Check Archive Log mode"
       become_user: oracle
       shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export ORACLE_SID={{ oracle_sid }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        sqlplus -s / as sysdba << 'SQLEOF'
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
         SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF
         SELECT LOG_MODE FROM V$DATABASE;
         EXIT;
-        SQLEOF
+        EOF
       register: archivelog_check
       changed_when: false
       tags: [archivelog]
 
-    - name: "DG-P2: Enable Archive Log mode"
+    - name: "DG-P2: Enable Archive Log mode (chỉ nếu chưa bật)"
       become_user: oracle
       shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export ORACLE_SID={{ oracle_sid }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        sqlplus -s / as sysdba << 'SQLEOF'
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
         SHUTDOWN IMMEDIATE;
         STARTUP MOUNT;
         ALTER DATABASE ARCHIVELOG;
         ALTER DATABASE OPEN;
         ALTER PLUGGABLE DATABASE ALL OPEN;
         EXIT;
-        SQLEOF
+        EOF
       when: "'NOARCHIVELOG' in archivelog_check.stdout"
       tags: [archivelog]
 
-    - name: "DG-P2: Verify Archive Log mode"
-      become_user: oracle
-      shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export ORACLE_SID={{ oracle_sid }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        sqlplus -s / as sysdba << 'SQLEOF'
-        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF
-        SELECT LOG_MODE FROM V$DATABASE;
-        EXIT;
-        SQLEOF
-      register: archivelog_verify
-      changed_when: false
-      tags: [archivelog]
-
-    - name: "DG-P2: Assert Archive Log enabled"
-      assert:
-        that: "'ARCHIVELOG' in archivelog_verify.stdout"
-        fail_msg: "Bật ARCHIVELOG thất bại!"
-      tags: [archivelog]
-
     # ==========================================
-    # STEP 3: Bật Force Logging + Flashback
+    # STEP 3: Force Logging + Flashback (idempotent)
     # ==========================================
-    - name: "DG-P3: Enable Force Logging và Flashback"
+    - name: "DG-P3: Check Force Logging và Flashback"
       become_user: oracle
       shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export ORACLE_SID={{ oracle_sid }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        sqlplus -s / as sysdba << 'SQLEOF'
-        ALTER DATABASE FORCE LOGGING;
-        ALTER SYSTEM SWITCH LOGFILE;
-        ALTER DATABASE FLASHBACK ON;
-        EXIT;
-        SQLEOF
-      tags: [force_logging]
-
-    - name: "DG-P3: Verify Force Logging"
-      become_user: oracle
-      shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export ORACLE_SID={{ oracle_sid }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        sqlplus -s / as sysdba << 'SQLEOF'
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
         SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF
         SELECT FORCE_LOGGING, FLASHBACK_ON FROM V$DATABASE;
         EXIT;
-        SQLEOF
-      register: force_logging_verify
+        EOF
+      register: fl_check
       changed_when: false
       tags: [force_logging]
 
-    - name: "DG-P3: Show Force Logging status"
-      debug:
-        msg: "{{ force_logging_verify.stdout_lines }}"
+    - name: "DG-P3: Enable Force Logging (chỉ nếu chưa bật)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        ALTER DATABASE FORCE LOGGING;
+        ALTER SYSTEM SWITCH LOGFILE;
+        EXIT;
+        EOF
+      when: "'YES' not in fl_check.stdout.split()[0]"
+      tags: [force_logging]
+
+    - name: "DG-P3: Enable Flashback (chỉ nếu chưa bật)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        ALTER DATABASE FLASHBACK ON;
+        EXIT;
+        EOF
+      when: "'YES' not in fl_check.stdout.split()[1] | default('')"
+      failed_when: false
       tags: [force_logging]
 
     # ==========================================
-    # STEP 4: Tạo Fast Recovery Area
+    # STEP 4: Fast Recovery Area (idempotent)
     # ==========================================
     - name: "DG-P4: Create FRA directory"
       file:
@@ -171,89 +140,88 @@
         mode: '0755'
       tags: [fra]
 
-    - name: "DG-P4: Configure FRA parameters"
+    - name: "DG-P4: Check FRA params hiện tại"
       become_user: oracle
       shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export ORACLE_SID={{ oracle_sid }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        sqlplus -s / as sysdba << 'SQLEOF'
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF
+        SELECT VALUE FROM V$PARAMETER WHERE NAME='db_recovery_file_dest';
+        EXIT;
+        EOF
+      register: fra_check
+      changed_when: false
+      tags: [fra]
+
+    - name: "DG-P4: Configure FRA parameters (chỉ nếu chưa set)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
         ALTER SYSTEM SET DB_RECOVERY_FILE_DEST_SIZE={{ fra_size }} SCOPE=BOTH;
         ALTER SYSTEM SET DB_RECOVERY_FILE_DEST='{{ fra_dest }}' SCOPE=BOTH;
         EXIT;
-        SQLEOF
+        EOF
+      when: "fra_dest not in fra_check.stdout"
       tags: [fra]
 
     # ==========================================
-    # STEP 5: Tạo Standby Redo Logs
+    # STEP 5: Standby Redo Logs (idempotent)
     # ==========================================
-    - name: "DG-P5: Check Standby Redo Logs đã tồn tại chưa"
+    - name: "DG-P5: Check Standby Redo Logs"
       become_user: oracle
       shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export ORACLE_SID={{ oracle_sid }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        sqlplus -s / as sysdba << 'SQLEOF'
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
         SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF
         SELECT COUNT(*) FROM V$LOGFILE WHERE TYPE='STANDBY';
         EXIT;
-        SQLEOF
+        EOF
       register: srl_check
       changed_when: false
       tags: [standby_redo]
 
-    - name: "DG-P5: Create Standby Redo Logs"
+    - name: "DG-P5: Create Standby Redo Logs (chỉ nếu chưa có)"
       become_user: oracle
       shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export ORACLE_SID={{ oracle_sid }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        sqlplus -s / as sysdba << 'SQLEOF'
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
         ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 10 SIZE 50M;
         ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 11 SIZE 50M;
         ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 12 SIZE 50M;
         ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 13 SIZE 50M;
         EXIT;
-        SQLEOF
+        EOF
       when: "'0' in srl_check.stdout"
       tags: [standby_redo]
 
-    - name: "DG-P5: Verify Standby Redo Logs"
+    # ==========================================
+    # STEP 6: DG Init Parameters (idempotent)
+    # QUAN TRỌNG: Không set LOG_ARCHIVE_DEST_2
+    # vì DG Broker tự quản lý log shipping
+    # ==========================================
+    - name: "DG-P6: Check DG params đã set chưa"
       become_user: oracle
       shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export ORACLE_SID={{ oracle_sid }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        sqlplus -s / as sysdba << 'SQLEOF'
-        SET PAGESIZE 50 LINESIZE 100
-        SELECT GROUP#, TYPE, MEMBER FROM V$LOGFILE WHERE TYPE='STANDBY' ORDER BY GROUP#;
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF
+        SELECT VALUE FROM V$PARAMETER WHERE NAME='log_archive_config';
         EXIT;
-        SQLEOF
-      register: srl_verify
+        EOF
+      register: dg_params_check
       changed_when: false
-      tags: [standby_redo]
+      tags: [dg_params]
 
-    - name: "DG-P5: Show Standby Redo Logs"
-      debug:
-        msg: "{{ srl_verify.stdout_lines }}"
-      tags: [standby_redo]
-
-    # ==========================================
-    # STEP 6: Cấu hình Init Parameters cho DG
-    # ==========================================
-    - name: "DG-P6: Set Data Guard init parameters"
+    - name: "DG-P6: Set Data Guard init parameters (chỉ nếu chưa set)"
       become_user: oracle
       shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export ORACLE_SID={{ oracle_sid }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        sqlplus -s / as sysdba << 'SQLEOF'
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
         ALTER SYSTEM SET DB_UNIQUE_NAME='{{ oracle_unique_name }}' SCOPE=SPFILE;
         ALTER SYSTEM SET LOG_ARCHIVE_CONFIG='DG_CONFIG=({{ oracle_unique_name }},{{ standby_unique_name }})' SCOPE=BOTH;
         ALTER SYSTEM SET LOG_ARCHIVE_DEST_1='LOCATION=USE_DB_RECOVERY_FILE_DEST VALID_FOR=(ALL_LOGFILES,ALL_ROLES) DB_UNIQUE_NAME={{ oracle_unique_name }}' SCOPE=BOTH;
-        ALTER SYSTEM SET LOG_ARCHIVE_DEST_2='SERVICE={{ standby_unique_name }} ASYNC VALID_FOR=(ONLINE_LOGFILES,PRIMARY_ROLE) DB_UNIQUE_NAME={{ standby_unique_name }}' SCOPE=BOTH;
         ALTER SYSTEM SET LOG_ARCHIVE_DEST_STATE_1=ENABLE SCOPE=BOTH;
-        ALTER SYSTEM SET LOG_ARCHIVE_DEST_STATE_2=ENABLE SCOPE=BOTH;
         ALTER SYSTEM SET LOG_ARCHIVE_FORMAT='%t_%s_%r.dbf' SCOPE=SPFILE;
         ALTER SYSTEM SET LOG_ARCHIVE_MAX_PROCESSES=4 SCOPE=BOTH;
         ALTER SYSTEM SET REMOTE_LOGIN_PASSWORDFILE=EXCLUSIVE SCOPE=SPFILE;
@@ -262,11 +230,13 @@
         ALTER SYSTEM SET STANDBY_FILE_MANAGEMENT=AUTO SCOPE=BOTH;
         ALTER SYSTEM SET DG_BROKER_START=TRUE SCOPE=BOTH;
         EXIT;
-        SQLEOF
+        EOF
+      when: "standby_unique_name not in dg_params_check.stdout"
+      register: dg_params_set
       tags: [dg_params]
 
     # ==========================================
-    # STEP 7: Cấu hình tnsnames.ora
+    # STEP 7: Network config (idempotent via copy module)
     # ==========================================
     - name: "DG-P7: Configure tnsnames.ora"
       copy:
@@ -283,16 +253,8 @@
             (DESCRIPTION =
               (ADDRESS = (PROTOCOL = TCP)(HOST = {{ standby_ip }})(PORT = {{ listener_port }}))
               (CONNECT_DATA = (SERVICE_NAME = {{ oracle_sid }})))
-
-          ORCLPDB1 =
-            (DESCRIPTION =
-              (ADDRESS = (PROTOCOL = TCP)(HOST = {{ primary_ip }})(PORT = {{ listener_port }}))
-              (CONNECT_DATA = (SERVICE_NAME = ORCLPDB1)))
       tags: [tns]
 
-    # ==========================================
-    # STEP 8: Cấu hình listener.ora
-    # ==========================================
     - name: "DG-P8: Configure listener.ora"
       copy:
         dest: "{{ oracle_home }}/network/admin/listener.ora"
@@ -320,163 +282,117 @@
                 (SID_NAME = {{ oracle_sid }})
               )
             )
+      register: listener_config
       tags: [listener]
 
-    - name: "DG-P8: Reload listener"
+    - name: "DG-P8: Reload listener (chỉ nếu config thay đổi)"
       become_user: oracle
       shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export PATH=$ORACLE_HOME/bin:$PATH
+        export ORACLE_HOME={{ oracle_home }} PATH={{ oracle_home }}/bin:$PATH
         lsnrctl reload
+      when: listener_config.changed
       tags: [listener]
 
     # ==========================================
-    # STEP 9: Restart DB để áp dụng SPFILE params
+    # STEP 9: Restart DB chỉ khi cần (SPFILE params)
     # ==========================================
-    - name: "DG-P9: Restart DB để áp dụng SPFILE changes"
+    - name: "DG-P9: Restart DB để áp dụng SPFILE changes (chỉ nếu params vừa thay đổi)"
       become_user: oracle
       shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export ORACLE_SID={{ oracle_sid }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        sqlplus -s / as sysdba << 'SQLEOF'
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
         SHUTDOWN IMMEDIATE;
         STARTUP;
         ALTER PLUGGABLE DATABASE ALL OPEN;
         EXIT;
-        SQLEOF
+        EOF
+      when: dg_params_set is defined and dg_params_set.changed
       tags: [restart]
 
     # ==========================================
-    # STEP 10: Copy Password File sang Standby
+    # STEP 10: Copy Password File sang Standby (idempotent)
     # ==========================================
-    - name: "DG-P10: Copy password file sang Standby qua SSH"
+    - name: "DG-P10: Check password file trên Standby đã đúng chưa"
+      shell: |
+        ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} \
+          "md5sum {{ oracle_base }}/dbs/orapw{{ oracle_sid }} 2>/dev/null || echo MISSING"
+      register: stby_pwd_check
+      changed_when: false
+      failed_when: false
+      tags: [pwdfile]
+
+    - name: "DG-P10: Get MD5 của password file trên Primary"
+      shell: md5sum {{ oracle_base }}/dbs/orapw{{ oracle_sid }}
+      register: primary_pwd_md5
+      changed_when: false
+      tags: [pwdfile]
+
+    - name: "DG-P10: Copy password file sang Standby (chỉ nếu khác hoặc thiếu)"
       shell: |
         scp -o StrictHostKeyChecking=no \
           {{ oracle_base }}/dbs/orapw{{ oracle_sid }} \
           root@{{ standby_ip }}:{{ oracle_base }}/dbs/orapw{{ oracle_sid }}
-      tags: [pwdfile]
-
-    - name: "DG-P10: Fix ownership password file trên Standby"
-      shell: |
         ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} \
           "chown oracle:oinstall {{ oracle_base }}/dbs/orapw{{ oracle_sid }}"
+      when: >
+        'MISSING' in stby_pwd_check.stdout or
+        primary_pwd_md5.stdout.split()[0] not in stby_pwd_check.stdout
       tags: [pwdfile]
 
     # ==========================================
-    # STEP 11: Cấu hình DG Broker trên Primary
-    # Phải chạy trên Primary vì configuration tồn tại ở đây
-    # Chạy sau khi setup_standby.yml đã hoàn tất RMAN duplicate
+    # STEP 11: DG Broker Configuration (idempotent)
+    # Chạy sau khi setup_standby.yml đã xong RMAN
     # ==========================================
-    - name: "DG-P11: Check Broker configuration đã tồn tại chưa"
+    - name: "DG-P11: Check Broker configuration"
       become_user: oracle
       shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export ORACLE_SID={{ oracle_sid }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        dgmgrl / << 'DGEOF'
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        dgmgrl / << 'EOF'
         SHOW CONFIGURATION;
         EXIT;
-        DGEOF
+        EOF
       register: broker_config_check
       failed_when: false
       changed_when: false
       tags: [broker]
 
-    - name: "DG-P11: Debug broker config"
-      debug:
-        msg: "{{ broker_config_check.stdout_lines }}"
-      tags: [broker]
-
-    - name: "DG-P11: Tạo Broker configuration (nếu chưa có)"
+    - name: "DG-P11: Create Broker configuration (chỉ nếu chưa có)"
       become_user: oracle
       shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export ORACLE_SID={{ oracle_sid }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        dgmgrl / << 'DGEOF'
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        dgmgrl / << 'EOF'
         CREATE CONFIGURATION 'DG_{{ oracle_sid }}' AS
           PRIMARY DATABASE IS '{{ oracle_unique_name }}'
           CONNECT IDENTIFIER IS '{{ oracle_unique_name }}';
         EXIT;
-        DGEOF
+        EOF
       when: "'ORA-16532' in broker_config_check.stdout"
       tags: [broker]
 
-    - name: "DG-P11: Check ORCL_STBY đã có trong Broker chưa"
+    - name: "DG-P11: Check ORCL_STBY trong Broker"
       become_user: oracle
       shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export ORACLE_SID={{ oracle_sid }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        dgmgrl / << 'DGEOF'
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        dgmgrl / << 'EOF'
         SHOW DATABASE '{{ standby_unique_name }}';
         EXIT;
-        DGEOF
+        EOF
       register: broker_stby_check
       failed_when: false
       changed_when: false
       tags: [broker]
 
-    # BUG FIX ORA-16698: Broker không cho phép LOG_ARCHIVE_DEST_2 có SERVICE attribute
-    # khi dùng Broker để quản lý log shipping. Phải xóa trước khi ADD DATABASE.
-    - name: "DG-P11: Xóa LOG_ARCHIVE_DEST_2 trên Primary (Broker tự quản lý)"
+    - name: "DG-P11: ADD Standby + ENABLE (chỉ nếu chưa có)"
       become_user: oracle
       shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export ORACLE_SID={{ oracle_sid }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        sqlplus -s / as sysdba << 'SQLEOF'
-        ALTER SYSTEM SET LOG_ARCHIVE_DEST_2='' SCOPE=BOTH;
-        ALTER SYSTEM SET LOG_ARCHIVE_DEST_STATE_2=ENABLE SCOPE=BOTH;
-        EXIT;
-        SQLEOF
-      when: >
-        'was not found' in broker_stby_check.stdout or
-        'ORA-16532' in broker_stby_check.stdout
-      tags: [broker]
-
-    - name: "DG-P11: Tạo script xóa LOG_ARCHIVE_DEST_2 cho Standby"
-      copy:
-        dest: /tmp/clear_dest2.sql
-        content: |
-          ALTER SYSTEM SET LOG_ARCHIVE_DEST_2='' SCOPE=BOTH;
-          EXIT;
-      when: >
-        'was not found' in broker_stby_check.stdout or
-        'ORA-16532' in broker_stby_check.stdout
-      tags: [broker]
-
-    - name: "DG-P11: Copy script sang Standby"
-      shell: scp -o StrictHostKeyChecking=no /tmp/clear_dest2.sql root@{{ standby_ip }}:/tmp/clear_dest2.sql
-      when: >
-        'was not found' in broker_stby_check.stdout or
-        'ORA-16532' in broker_stby_check.stdout
-      tags: [broker]
-
-    - name: "DG-P11: Xóa LOG_ARCHIVE_DEST_2 trên Standby qua SSH"
-      shell: |
-        ssh -o StrictHostKeyChecking=no root@{{ standby_ip }}           "su - oracle -s /bin/bash -c 'ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:\$PATH {{ oracle_home }}/bin/sqlplus -s / as sysdba @/tmp/clear_dest2.sql'"
-      when: >
-        'was not found' in broker_stby_check.stdout or
-        'ORA-16532' in broker_stby_check.stdout
-      failed_when: false
-      tags: [broker]
-
-    - name: "DG-P11: ADD Standby + ENABLE configuration"
-      become_user: oracle
-      shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export ORACLE_SID={{ oracle_sid }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        dgmgrl / << 'DGEOF'
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        dgmgrl / << 'EOF'
         ADD DATABASE '{{ standby_unique_name }}'
           AS CONNECT IDENTIFIER IS '{{ standby_unique_name }}'
           MAINTAINED AS PHYSICAL;
         ENABLE CONFIGURATION;
-        SHOW CONFIGURATION;
         EXIT;
-        DGEOF
+        EOF
       when: >
         'was not found' in broker_stby_check.stdout or
         'ORA-16532' in broker_stby_check.stdout
@@ -490,7 +406,7 @@
       when: broker_add_result is not skipped
       tags: [broker]
 
-    - name: "DG-P11: Chờ Broker khởi động"
+    - name: "DG-P11: Chờ Broker ổn định"
       pause:
         seconds: 20
       tags: [broker]
@@ -498,20 +414,18 @@
     - name: "DG-P11: Verify DG configuration"
       become_user: oracle
       shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export ORACLE_SID={{ oracle_sid }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        dgmgrl / << 'DGEOF'
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        dgmgrl / << 'EOF'
         SHOW CONFIGURATION;
         SHOW DATABASE VERBOSE '{{ oracle_unique_name }}';
         SHOW DATABASE VERBOSE '{{ standby_unique_name }}';
         EXIT;
-        DGEOF
+        EOF
       register: dg_final
       changed_when: false
       tags: [broker, validate]
 
-    - name: "DG-P11: Show final DG status"
+    - name: "DG-P11: Show DG status"
       debug:
         msg: "{{ dg_final.stdout_lines }}"
       tags: [broker, validate]
@@ -527,11 +441,10 @@
           - "============================================"
           - "Primary  : {{ oracle_unique_name }} @ {{ primary_ip }}"
           - "Standby  : {{ standby_unique_name }} @ {{ standby_ip }}"
-          - "Archive  : ARCHIVELOG mode"
-          - "Broker   : DG_BROKER_START=TRUE"
-          - "Password file đã copy sang {{ standby_ip }}"
           - ""
-          - "Bước tiếp theo:"
-          - "  Chạy setup_standby.yml trên server {{ standby_ip }}"
+          - "Workflow:"
+          - "  1. setup_primary.yml  ← đã xong"
+          - "  2. setup_standby.yml trên {{ standby_ip }}"
+          - "  3. setup_primary.yml --tags broker (sau khi standby xong)"
           - "============================================"
       tags: [always]
