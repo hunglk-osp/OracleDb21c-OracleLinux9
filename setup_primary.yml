@@ -436,19 +436,27 @@
         'ORA-16532' in broker_stby_check.stdout
       tags: [broker]
 
-    - name: "DG-P11: Xóa LOG_ARCHIVE_DEST_2 trên Standby qua SSH (Broker tự quản lý)"
+    - name: "DG-P11: Tạo script xóa LOG_ARCHIVE_DEST_2 cho Standby"
+      copy:
+        dest: /tmp/clear_dest2.sql
+        content: |
+          ALTER SYSTEM SET LOG_ARCHIVE_DEST_2='' SCOPE=BOTH;
+          EXIT;
+      when: >
+        'was not found' in broker_stby_check.stdout or
+        'ORA-16532' in broker_stby_check.stdout
+      tags: [broker]
+
+    - name: "DG-P11: Copy script sang Standby"
+      shell: scp -o StrictHostKeyChecking=no /tmp/clear_dest2.sql root@{{ standby_ip }}:/tmp/clear_dest2.sql
+      when: >
+        'was not found' in broker_stby_check.stdout or
+        'ORA-16532' in broker_stby_check.stdout
+      tags: [broker]
+
+    - name: "DG-P11: Xóa LOG_ARCHIVE_DEST_2 trên Standby qua SSH"
       shell: |
-        ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} "
-          su - oracle -c '
-            export ORACLE_HOME={{ oracle_home }}
-            export ORACLE_SID={{ oracle_sid }}
-            export PATH=\$ORACLE_HOME/bin:\$PATH
-            sqlplus -s / as sysdba << SQLEOF
-ALTER SYSTEM SET LOG_ARCHIVE_DEST_2="" SCOPE=BOTH;
-EXIT;
-SQLEOF
-          '
-        "
+        ssh -o StrictHostKeyChecking=no root@{{ standby_ip }}           "export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:\$PATH; sqlplus -s / as sysdba @/tmp/clear_dest2.sql"
       when: >
         'was not found' in broker_stby_check.stdout or
         'ORA-16532' in broker_stby_check.stdout
