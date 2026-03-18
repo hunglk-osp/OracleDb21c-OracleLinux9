@@ -313,65 +313,6 @@
         backrefs: yes
       tags: [compatibility]
 
-    - name: "STEP 3.4: Create stat_wrap.c"
-      copy:
-        dest: /tmp/stat_wrap.c
-        content: |
-          #define _GNU_SOURCE
-          #include <sys/stat.h>
-          #include <sys/types.h>
-          #include <unistd.h>
-          #include <fcntl.h>
-          int stat(const char *path, struct stat *buf) {
-              return syscall(4, path, buf);
-          }
-          int fstat(int fd, struct stat *buf) {
-              return syscall(5, fd, buf);
-          }
-      tags: [compatibility]
-
-    - name: "STEP 3.4: Compile stat_wrap"
-      shell: gcc -c /tmp/stat_wrap.c -o /tmp/stat_wrap.o
-      args:
-        creates: /tmp/stat_wrap.o
-      tags: [compatibility]
-
-    - name: "STEP 3.4: Check injection libnnzst"
-      stat:
-        path: "{{ oracle_home }}/lib/.stat_wrap_nnzst"
-      register: stat_nnzst
-      tags: [compatibility]
-
-    - name: "STEP 3.4: Inject libnnzst"
-      shell: ar r {{ oracle_home }}/lib/libnnzst.a /tmp/stat_wrap.o
-      when: not stat_nnzst.stat.exists
-      tags: [compatibility]
-
-    - name: "STEP 3.4: Mark libnnzst"
-      file:
-        path: "{{ oracle_home }}/lib/.stat_wrap_nnzst"
-        state: touch
-      when: not stat_nnzst.stat.exists
-      tags: [compatibility]
-
-    - name: "STEP 3.4: Check injection libjavavm"
-      stat:
-        path: "{{ oracle_home }}/lib/.stat_wrap_javavm"
-      register: stat_javavm
-      tags: [compatibility]
-
-    - name: "STEP 3.4: Inject libjavavm"
-      shell: ar r {{ oracle_home }}/lib/libjavavm.a /tmp/stat_wrap.o
-      when: not stat_javavm.stat.exists
-      tags: [compatibility]
-
-    - name: "STEP 3.4: Mark libjavavm"
-      file:
-        path: "{{ oracle_home }}/lib/.stat_wrap_javavm"
-        state: touch
-      when: not stat_javavm.stat.exists
-      tags: [compatibility]
-
     # ==========================================
     # STEP 4: Install Oracle Software Only
     # (KHÔNG tạo DB — standby DB do RMAN tạo)
@@ -457,6 +398,65 @@
       shell: "{{ oracle_home }}/root.sh"
       when: rootsh.stat.exists
       tags: [install]
+
+    # STEP 3.4 chạy SAU root.sh vì lib/ chỉ tồn tại sau khi root.sh tạo ra
+    # (Oracle 21c read-only home — lib/ không có trong ZIP, được tạo khi root.sh chạy)
+    - name: "STEP 3.4: Check lib directory tồn tại (sau root.sh)"
+      stat:
+        path: "{{ oracle_home }}/lib"
+      register: lib_dir
+      tags: [compatibility]
+
+    - name: "STEP 3.4: Create stat_wrap.c"
+      copy:
+        dest: /tmp/stat_wrap.c
+        content: |
+          #define _GNU_SOURCE
+          #include <sys/stat.h>
+          #include <sys/types.h>
+          #include <unistd.h>
+          #include <fcntl.h>
+          int stat(const char *path, struct stat *buf) {
+              return syscall(4, path, buf);
+          }
+          int fstat(int fd, struct stat *buf) {
+              return syscall(5, fd, buf);
+          }
+      when: lib_dir.stat.exists
+      tags: [compatibility]
+
+    - name: "STEP 3.4: Compile stat_wrap"
+      shell: gcc -c /tmp/stat_wrap.c -o /tmp/stat_wrap.o
+      args:
+        creates: /tmp/stat_wrap.o
+      when: lib_dir.stat.exists
+      tags: [compatibility]
+
+    - name: "STEP 3.4: Check injection libnnzst"
+      stat:
+        path: "{{ oracle_home }}/lib/libnnzst.a"
+      register: stat_nnzst
+      tags: [compatibility]
+
+    - name: "STEP 3.4: Inject libnnzst (nếu tồn tại)"
+      shell: ar r {{ oracle_home }}/lib/libnnzst.a /tmp/stat_wrap.o
+      when:
+        - lib_dir.stat.exists
+        - stat_nnzst.stat.exists
+      tags: [compatibility]
+
+    - name: "STEP 3.4: Check injection libjavavm"
+      stat:
+        path: "{{ oracle_home }}/lib/libjavavm.a"
+      register: stat_javavm
+      tags: [compatibility]
+
+    - name: "STEP 3.4: Inject libjavavm (nếu tồn tại)"
+      shell: ar r {{ oracle_home }}/lib/libjavavm.a /tmp/stat_wrap.o
+      when:
+        - lib_dir.stat.exists
+        - stat_javavm.stat.exists
+      tags: [compatibility]
 
     # [FIX-6] oradism suid
     - name: "STEP 4.4: Fix oradism suid permission"
