@@ -119,9 +119,30 @@
       tags: [listener]
 
     # ==========================================
-    # STEP 5: Tắt DB hiện tại, chuẩn bị cho RMAN duplicate
+    # STEP 5: Check DB role, nếu chưa là Standby thì shutdown + NOMOUNT
     # ==========================================
-    - name: "DG-S5: Shutdown DB trên Standby"
+    - name: "DG-S5: Check DB role hiện tại"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'SQLEOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF
+        SELECT DATABASE_ROLE FROM V$DATABASE;
+        EXIT;
+        SQLEOF
+      register: db_role_check
+      failed_when: false
+      changed_when: false
+      tags: [rman_prep]
+
+    - name: "DG-S5: Debug DB role"
+      debug:
+        msg: "DB role hiện tại: {{ db_role_check.stdout | trim }}"
+      tags: [rman_prep]
+
+    - name: "DG-S5: Shutdown DB trên Standby (chỉ nếu chưa phải Physical Standby)"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }}
@@ -131,6 +152,7 @@
         SHUTDOWN ABORT;
         EXIT;
         SQLEOF
+      when: "'PHYSICAL STANDBY' not in db_role_check.stdout"
       failed_when: false
       tags: [rman_prep]
 
@@ -140,6 +162,7 @@
         cat > {{ oracle_home }}/dbs/init{{ oracle_sid }}_stby.ora << 'EOF'
         db_name={{ oracle_sid }}
         EOF
+      when: "'PHYSICAL STANDBY' not in db_role_check.stdout"
       tags: [rman_prep]
 
     - name: "DG-S5: Startup NOMOUNT trên Standby"
@@ -152,6 +175,7 @@
         STARTUP NOMOUNT PFILE='{{ oracle_home }}/dbs/init{{ oracle_sid }}_stby.ora';
         EXIT;
         SQLEOF
+      when: "'PHYSICAL STANDBY' not in db_role_check.stdout"
       tags: [rman_prep]
 
     - name: "DG-S5: Verify NOMOUNT status"
@@ -167,12 +191,14 @@
         SQLEOF
       register: nomount_check
       changed_when: false
+      when: "'PHYSICAL STANDBY' not in db_role_check.stdout"
       tags: [rman_prep]
 
     - name: "DG-S5: Assert NOMOUNT"
       assert:
         that: "'STARTED' in nomount_check.stdout"
         fail_msg: "DB không ở trạng thái NOMOUNT (STARTED)!"
+      when: "'PHYSICAL STANDBY' not in db_role_check.stdout"
       tags: [rman_prep]
 
     # ==========================================
@@ -180,9 +206,24 @@
     # Chạy từ Standby, connect đến Primary qua network
     # ==========================================
     - name: "DG-S6: Check RMAN duplicate đã thực hiện chưa"
-      stat:
-        path: "{{ oracle_base }}/oradata/{{ standby_unique_name }}"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        sqlplus -s / as sysdba << 'SQLEOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF
+        SELECT DATABASE_ROLE FROM V$DATABASE;
+        EXIT;
+        SQLEOF
       register: rman_done
+      failed_when: false
+      changed_when: false
+      tags: [rman]
+
+    - name: "DG-S6: Debug RMAN check"
+      debug:
+        msg: "DB role hiện tại: {{ rman_done.stdout | trim }}"
       tags: [rman]
 
     - name: "DG-S6: RMAN Duplicate (20-60 phút tùy DB size)"
@@ -197,7 +238,6 @@
         DUPLICATE TARGET DATABASE
           FOR STANDBY
           FROM ACTIVE DATABASE
-          DORECOVER
           SPFILE
             SET DB_UNIQUE_NAME='{{ standby_unique_name }}'
             SET LOG_ARCHIVE_DEST_1='LOCATION=USE_DB_RECOVERY_FILE_DEST VALID_FOR=(ALL_LOGFILES,ALL_ROLES) DB_UNIQUE_NAME={{ standby_unique_name }}'
@@ -214,7 +254,10 @@
           NOFILENAMECHECK;
         EXIT;
         RMANEOF
-      when: not rman_done.stat.exists
+      when: "'PHYSICAL STANDBY' not in rman_done.stdout"
+
+    # Fix STEP 5 (rman_prep) cũng phải skip nếu đã là standby
+    # Thêm check trước shutdown
       async: 7200
       poll: 30
       tags: [rman]
