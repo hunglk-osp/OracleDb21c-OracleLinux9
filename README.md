@@ -95,17 +95,19 @@ Cấu hình Oracle Data Guard Physical Standby giữa 2 server:
 ```bash
 ansible-playbook setup_primary.yml
 ```
-> Lần đầu chạy, playbook sẽ hỏi password SSH của server 196 để setup SSH key.
-> Các lần sau không cần nhập gì thêm.
+> Playbook tự động generate SSH key (`/root/.ssh/id_rsa`) và copy sang server 196
+> bằng `ssh-copy-id`. Lần đầu chạy sẽ hỏi password root của server 196 **1 lần duy nhất**.
+> Các lần sau SSH key đã có sẵn, không hỏi gì thêm.
 
 Playbook này thực hiện:
+- Generate SSH key trên Primary + copy sang Standby (1 lần)
 - Bật ARCHIVELOG mode
 - Bật Force Logging + Flashback
 - Tạo Fast Recovery Area
 - Tạo Standby Redo Logs
 - Cấu hình Data Guard init parameters
 - Cấu hình tnsnames.ora + listener.ora
-- Copy password file sang Standby (192.168.1.196) qua SSH
+- Copy password file sang Standby (192.168.1.196) qua `scp`
 
 ### Bước 2 — Chạy trên Standby (192.168.1.196)
 ```bash
