@@ -1,6 +1,8 @@
 # install_oracle21c_FINAL.yml
 # Oracle Database 21c on Oracle Linux 9 - FINAL VERSION
 # Bug fixed: DBCA condition now checks for ORA errors properly
+# Bug fixed: oradism suid bit preserved (was wiped by STEP 8.2 recurse)
+# Bug fixed: systemd service runs as root to allow oradism to work
 ---
 - name: Install Oracle Database 21c on Oracle Linux 9
   hosts: localhost
@@ -448,6 +450,20 @@
       tags: [install]
 
     # ==========================================
+    # STEP 4.4: Fix oradism permission
+    # BUG FIX: root.sh sets suid on oradism, but STEP 4.1.5 (recurse ownership)
+    # may run AFTER root.sh and wipe the suid bit, causing ORA-12791 on startup.
+    # Always re-apply correct oradism permission after root.sh.
+    # ==========================================
+    - name: "STEP 4.4: Fix oradism suid permission"
+      file:
+        path: "{{ oracle_home }}/bin/oradism"
+        owner: root
+        group: oinstall
+        mode: '4710'
+      tags: [install, autostart]
+
+    # ==========================================
     # STEP 5: Listener & Database
     # ==========================================
     - name: "STEP 5.1: Check listener"
@@ -479,6 +495,19 @@
               (DESCRIPTION =
                 (ADDRESS = (PROTOCOL = TCP)(HOST = {{ server_ip }})(PORT = {{ listener_port }}))
                 (ADDRESS = (PROTOCOL = IPC)(KEY = EXTPROC1521))
+              )
+            )
+          SID_LIST_LISTENER =
+            (SID_LIST =
+              (SID_DESC =
+                (GLOBAL_DBNAME = {{ oracle_sid }})
+                (ORACLE_HOME = {{ oracle_home }})
+                (SID_NAME = {{ oracle_sid }})
+              )
+              (SID_DESC =
+                (GLOBAL_DBNAME = {{ oracle_sid }}_DGMGRL)
+                (ORACLE_HOME = {{ oracle_home }})
+                (SID_NAME = {{ oracle_sid }})
               )
             )
         owner: oracle
@@ -593,7 +622,7 @@
       tags: [network]
 
     # ==========================================
-    # STEP 7: Register Services - FIXED
+    # STEP 7: Register Services
     # ==========================================
     - name: "STEP 7.0: Ensure DB is running"
       become_user: oracle
@@ -701,11 +730,23 @@
         policy: targeted
       tags: [autostart]
 
-    - name: "STEP 8.2: Set bin perms"
+    # BUG FIX: Original STEP 8.2 used recurse: yes on $ORACLE_HOME/bin
+    # which wiped the suid bit from oradism (root-owned, mode 4710).
+    # After chmod 755 recurse, oradism loses suid => ORA-12791 on every boot.
+    # Fix: only set 755 on the bin directory itself, not recursively.
+    # oradism permission is handled separately in STEP 4.4.
+    - name: "STEP 8.2: Set bin dir permission (no recurse)"
       file:
         path: "{{ oracle_home }}/bin"
         mode: '0755'
-        recurse: yes
+      tags: [autostart]
+
+    - name: "STEP 8.2: Re-fix oradism suid after any permission changes"
+      file:
+        path: "{{ oracle_home }}/bin/oradism"
+        owner: root
+        group: oinstall
+        mode: '4710'
       tags: [autostart]
 
     - name: "STEP 8.3: Configure oratab"
@@ -727,6 +768,10 @@
         EOF
       tags: [autostart]
 
+    # BUG FIX: Original service used User=oracle which prevents oradism
+    # from getting root privileges needed to allocate SGA (ORA-12791).
+    # Fix: run service as root, dbstart/dbshut internally su to oracle.
+    # Also added memlock limits to prevent SGA allocation warnings.
     - name: "STEP 8.5: Create systemd service"
       copy:
         dest: /etc/systemd/system/oracle-db.service
@@ -734,15 +779,18 @@
           [Unit]
           Description=Oracle Database 21c
           After=network.target
+
           [Service]
           Type=forking
-          User=oracle
-          Group=oinstall
           Environment=ORACLE_HOME={{ oracle_home }}
           Environment=ORACLE_SID={{ oracle_sid }}
+          Environment=ORACLE_BASE={{ oracle_base }}
+          ExecStartPre=/bin/bash -c 'chmod 4710 {{ oracle_home }}/bin/oradism && chown root:oinstall {{ oracle_home }}/bin/oradism'
           ExecStart={{ oracle_home }}/bin/dbstart {{ oracle_home }}
           ExecStop={{ oracle_home }}/bin/dbshut {{ oracle_home }}
           RemainAfterExit=yes
+          LimitMEMLOCK=infinity
+
           [Install]
           WantedBy=multi-user.target
       tags: [autostart]
