@@ -372,6 +372,7 @@
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
         export PATH=$ORACLE_HOME/bin:$PATH
         dgmgrl / << 'DGEOF'
         SHOW CONFIGURATION;
@@ -391,6 +392,7 @@
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
         export PATH=$ORACLE_HOME/bin:$PATH
         dgmgrl / << 'DGEOF'
         CREATE CONFIGURATION 'DG_{{ oracle_sid }}' AS
@@ -405,6 +407,7 @@
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
         export PATH=$ORACLE_HOME/bin:$PATH
         dgmgrl / << 'DGEOF'
         SHOW DATABASE '{{ standby_unique_name }}';
@@ -419,6 +422,7 @@
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
         export PATH=$ORACLE_HOME/bin:$PATH
         dgmgrl / << 'DGEOF'
         ADD DATABASE '{{ standby_unique_name }}'
@@ -442,6 +446,7 @@
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
         export PATH=$ORACLE_HOME/bin:$PATH
         dgmgrl / << 'DGEOF'
         SHOW CONFIGURATION;
