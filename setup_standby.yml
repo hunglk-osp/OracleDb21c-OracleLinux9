@@ -202,8 +202,8 @@
             SET DB_UNIQUE_NAME='{{ standby_unique_name }}'
             SET LOG_ARCHIVE_DEST_1='LOCATION=USE_DB_RECOVERY_FILE_DEST VALID_FOR=(ALL_LOGFILES,ALL_ROLES) DB_UNIQUE_NAME={{ standby_unique_name }}'
             SET LOG_ARCHIVE_DEST_2='SERVICE={{ oracle_unique_name }} ASYNC VALID_FOR=(ONLINE_LOGFILES,PRIMARY_ROLE) DB_UNIQUE_NAME={{ oracle_unique_name }}'
-            SET LOG_ARCHIVE_DEST_STATE_1=ENABLE
-            SET LOG_ARCHIVE_DEST_STATE_2=ENABLE
+            SET LOG_ARCHIVE_DEST_STATE_1='ENABLE'
+            SET LOG_ARCHIVE_DEST_STATE_2='ENABLE'
             SET LOG_ARCHIVE_CONFIG='DG_CONFIG=({{ oracle_unique_name }},{{ standby_unique_name }})'
             SET FAL_SERVER='{{ oracle_unique_name }}'
             SET FAL_CLIENT='{{ standby_unique_name }}'
