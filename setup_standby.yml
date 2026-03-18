@@ -283,8 +283,8 @@
       tags: [rman]
 
     # ==========================================
-    # STEP 7: Bật DG Broker và tạo configuration
-    # Chạy từ Standby sau khi RMAN xong
+    # STEP 7: Bật DG Broker trên Standby
+    # CREATE CONFIGURATION và ADD DATABASE chạy trên Primary (setup_primary.yml)
     # ==========================================
     - name: "DG-S7: Enable DG Broker trên Standby"
       become_user: oracle
@@ -298,85 +298,26 @@
         SQLEOF
       tags: [broker]
 
-    # BUG FIX: Configuration đã tồn tại từ lần chạy trước nên CREATE sẽ fail.
-    # Check xem ORCL_STBY đã có chưa, nếu chưa thì ADD, sau đó ENABLE.
-    - name: "DG-S7: Check ORCL_STBY đã có trong Broker chưa"
+    - name: "DG-S7: Verify Standby role và trạng thái"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }}
+        export ORACLE_SID={{ oracle_sid }}
         export PATH=$ORACLE_HOME/bin:$PATH
-        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'DGEOF'
-        SHOW DATABASE '{{ standby_unique_name }}';
+        sqlplus -s / as sysdba << 'SQLEOF'
+        SET PAGESIZE 50 LINESIZE 100
+        SELECT DATABASE_ROLE, OPEN_MODE, DB_UNIQUE_NAME FROM V$DATABASE;
+        SELECT PROCESS, STATUS, SEQUENCE# FROM V$MANAGED_STANDBY WHERE PROCESS='MRP0';
         EXIT;
-        DGEOF
-      register: broker_stby_check
-      failed_when: false
+        SQLEOF
+      register: standby_status
       changed_when: false
       tags: [broker]
 
-    - name: "DG-S7: ADD ORCL_STBY vào Broker configuration (nếu chưa có)"
-      become_user: oracle
-      shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'DGEOF'
-        ADD DATABASE '{{ standby_unique_name }}'
-          AS CONNECT IDENTIFIER IS '{{ standby_unique_name }}'
-          MAINTAINED AS PHYSICAL;
-        ENABLE CONFIGURATION;
-        EXIT;
-        DGEOF
-      when: >
-        'was not found' in broker_stby_check.stdout or
-        'ORA-16532' in broker_stby_check.stdout
-      tags: [broker]
-
-    - name: "DG-S7: Chờ Broker khởi động"
-      pause:
-        seconds: 15
-      tags: [broker]
-
-    # ==========================================
-    # STEP 8: Validate cấu hình
-    # ==========================================
-    - name: "DG-S8: Show DG configuration"
-      become_user: oracle
-      shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'DGEOF'
-        SHOW CONFIGURATION;
-        SHOW DATABASE VERBOSE '{{ oracle_unique_name }}';
-        SHOW DATABASE VERBOSE '{{ standby_unique_name }}';
-        EXIT;
-        DGEOF
-      register: dg_config
-      changed_when: false
-      tags: [validate]
-
-    - name: "DG-S8: Show DG status"
+    - name: "DG-S7: Show Standby status"
       debug:
-        msg: "{{ dg_config.stdout_lines }}"
-      tags: [validate]
-
-    - name: "DG-S8: Validate databases"
-      become_user: oracle
-      shell: |
-        export ORACLE_HOME={{ oracle_home }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'DGEOF'
-        VALIDATE DATABASE '{{ oracle_unique_name }}';
-        VALIDATE DATABASE '{{ standby_unique_name }}';
-        EXIT;
-        DGEOF
-      register: dg_validate
-      changed_when: false
-      tags: [validate]
-
-    - name: "DG-S8: Show validate result"
-      debug:
-        msg: "{{ dg_validate.stdout_lines }}"
-      tags: [validate]
+        msg: "{{ standby_status.stdout_lines }}"
+      tags: [broker]
 
     # ==========================================
     # SUMMARY
