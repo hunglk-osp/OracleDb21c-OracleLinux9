@@ -429,12 +429,20 @@
           AS CONNECT IDENTIFIER IS '{{ standby_unique_name }}'
           MAINTAINED AS PHYSICAL;
         ENABLE CONFIGURATION;
+        SHOW CONFIGURATION;
         EXIT;
         DGEOF
       when: >
         'was not found' in broker_stby_check.stdout or
         'ORA-16532' in broker_stby_check.stdout
       register: broker_add_result
+      failed_when: false
+      tags: [broker]
+
+    - name: "DG-P11: Debug ADD result"
+      debug:
+        msg: "{{ broker_add_result.stdout_lines }}"
+      when: broker_add_result is not skipped
       tags: [broker]
 
     - name: "DG-P11: Chờ Broker khởi động"
