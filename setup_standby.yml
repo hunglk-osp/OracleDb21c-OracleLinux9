@@ -255,21 +255,37 @@
         SQLEOF
       tags: [broker]
 
-    - name: "DG-S7: Tạo DG Broker configuration (chạy từ Primary qua TNS)"
+    # BUG FIX: Configuration đã tồn tại từ lần chạy trước nên CREATE sẽ fail.
+    # Check xem ORCL_STBY đã có chưa, nếu chưa thì ADD, sau đó ENABLE.
+    - name: "DG-S7: Check ORCL_STBY đã có trong Broker chưa"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }}
         export PATH=$ORACLE_HOME/bin:$PATH
         dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'DGEOF'
-        CREATE CONFIGURATION 'DG_{{ oracle_sid }}' AS
-          PRIMARY DATABASE IS '{{ oracle_unique_name }}'
-          CONNECT IDENTIFIER IS '{{ oracle_unique_name }}';
+        SHOW DATABASE '{{ standby_unique_name }}';
+        EXIT;
+        DGEOF
+      register: broker_stby_check
+      failed_when: false
+      changed_when: false
+      tags: [broker]
+
+    - name: "DG-S7: ADD ORCL_STBY vào Broker configuration (nếu chưa có)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'DGEOF'
         ADD DATABASE '{{ standby_unique_name }}'
           AS CONNECT IDENTIFIER IS '{{ standby_unique_name }}'
           MAINTAINED AS PHYSICAL;
         ENABLE CONFIGURATION;
         EXIT;
         DGEOF
+      when: >
+        'was not found' in broker_stby_check.stdout or
+        'ORA-16532' in broker_stby_check.stdout
       tags: [broker]
 
     - name: "DG-S7: Chờ Broker khởi động"
