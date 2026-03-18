@@ -29,7 +29,7 @@
     # ==========================================
     - name: "DG-S1: Check password file tồn tại"
       stat:
-        path: "{{ oracle_home }}/dbs/orapw{{ oracle_sid }}"
+        path: "{{ oracle_base }}/dbs/orapw{{ oracle_sid }}"
       register: pwdfile
       tags: [prereq]
 
@@ -37,7 +37,7 @@
       assert:
         that: pwdfile.stat.exists
         fail_msg: >
-          Password file {{ oracle_home }}/dbs/orapw{{ oracle_sid }} không tồn tại!
+          Password file {{ oracle_base }}/dbs/orapw{{ oracle_sid }} không tồn tại!
           Hãy chắc chắn setup_primary.yml đã chạy xong trên server 195.
       tags: [prereq]
 
