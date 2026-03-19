@@ -11,8 +11,7 @@
 # [FIX-6] Bỏ STEP 3.4 inject libnnzst.a / libjavavm.a — Oracle 21c không dùng static .a nữa
 ---
 - name: Install Oracle Database 21c on Oracle Linux 9 - PRIMARY
-  hosts: localhost
-  connection: local
+  hosts: primary
   become: yes
   vars:
     oracle_base: /u01/app/oracle
@@ -31,8 +30,7 @@
     hostname_short: primarydb
     listener_port: 1521
     total_memory: 2048
-    zip_file_local: "./LINUX.X64_213000_db_home.zip"
-    zip_file_remote: "/tmp/LINUX.X64_213000_db_home.zip"
+    zip_file_remote: "/root/OracleDb21c-OracleLinux9/LINUX.X64_213000_db_home.zip"
     cv_assume_distid: "OEL8.4"
 
   tasks:
@@ -224,22 +222,7 @@
     # ==========================================
     # STEP 2: Extract Software
     # ==========================================
-    - name: "STEP 2.1: Check ZIP locally"
-      stat:
-        path: "{{ zip_file_local }}"
-      delegate_to: localhost
-      become: no
-      register: zip_local
-      tags: [software]
-
-    - name: "STEP 2.2: Upload ZIP"
-      copy:
-        src: "{{ zip_file_local }}"
-        dest: "{{ zip_file_remote }}"
-      when: zip_local.stat.exists
-      tags: [software]
-
-    - name: "STEP 2.2: Verify ZIP"
+    - name: "STEP 2.1: Verify ZIP on remote"
       stat:
         path: "{{ zip_file_remote }}"
       register: zip_remote

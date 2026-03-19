@@ -1,136 +1,112 @@
-# Oracle Database 21c Installation for Oracle Linux 9
-Production-ready Ansible playbook for installing Oracle Database 21c on Oracle Linux 9.
+# Oracle Database 21c + Data Guard on Oracle Linux 9
+
+## Servers
+
+| Role    | Hostname     | IP             | DB_UNIQUE_NAME |
+|---------|--------------|----------------|----------------|
+| Primary | primarydb    | 192.168.1.195  | ORCL           |
+| Standby | standbydb    | 192.168.1.196  | ORCL_STBY      |
+
+---
 
 ## Files
+
 ```
-install_oracle21c_FINAL.yml  - Main installation playbook
-setup_primary.yml            - Data Guard: cấu hình Primary (192.168.1.195)
-setup_standby.yml            - Data Guard: cấu hình Standby (192.168.1.196)
-cleanup_oracle21c.yml        - Complete cleanup playbook
-inventory.ini                - Ansible inventory
-ansible.cfg                  - Ansible configuration
-LINUX.X64_213000_db_home.zip - Oracle 21c installer (not included)
-```
-
-## Prerequisites
-- Oracle Linux 9 (x86_64) - Minimal Install
-- Minimum 8GB RAM (16GB recommended)
-- Minimum 40GB disk space for /u01
-- Oracle Database 21c ZIP file
-
-## Quick Start - Fresh Install
-```bash
-# 1. Install Ansible
-dnf install -y ansible-core
-
-# 2. Place ZIP file in same directory as playbook
-ls LINUX.X64_213000_db_home.zip
-
-# 3. Run installation
-ansible-playbook install_oracle21c_FINAL.yml
-
-# Installation takes ~45-60 minutes
-```
-
-## Connection Info (Default)
-```
-Hostname: <auto-detected>
-Port: 1521
-CDB: ORCL
-PDB: orclpdb1
-User: chirag
-Password: Tiger123
-SYS Password: Oracle_4U (SYSDBA role)
-```
-
-## Customize Installation
-Create a custom vars file:
-```bash
-cat > my_vars.yml << EOF
-hostname_fqdn: mydb.example.com
-oracle_sid: PROD
-pdb_name: PRODPDB
-db_username: appuser
-db_user_password: "MySecurePass123"
-sys_password: "SysSecure456"
-total_memory: 4096
-EOF
-
-# Run with custom vars
-ansible-playbook install_oracle21c_FINAL.yml -e @my_vars.yml
-```
-
-## Run Specific Steps
-```bash
-# Only OS preparation
-ansible-playbook install_oracle21c_FINAL.yml --tags "os_prep"
-
-# Only install software (skip DB creation)
-ansible-playbook install_oracle21c_FINAL.yml --tags "install"
-
-# Only create database
-ansible-playbook install_oracle21c_FINAL.yml --tags "database"
-
-# Only setup auto-start
-ansible-playbook install_oracle21c_FINAL.yml --tags "autostart"
+install_oracle21c_primary.yml  - Cài Oracle software + tạo DB trên Primary
+install_oracle21c_standby.yml  - Cài Oracle software (không tạo DB) trên Standby
+setup_primary.yml              - Cấu hình DG trên Primary (archivelog, SRL, broker, copy pwdfile)
+setup_standby.yml              - RMAN duplicate + bật MRP trên Standby
+cleanup_oracle21c.yml          - Xóa toàn bộ Oracle trên 1 hoặc 2 máy
+inventory.ini                  - Ansible inventory
+ansible.cfg                    - Ansible configuration
+LINUX.X64_213000_db_home.zip   - Oracle 21c installer (phải có sẵn trên từng máy)
 ```
 
 ---
 
-## Data Guard Setup
+## Yêu cầu
 
-Cấu hình Oracle Data Guard Physical Standby giữa 2 server:
+- Oracle Linux 9 (x86_64) — Minimal Install
+- RAM tối thiểu 8GB (khuyến nghị 16GB)
+- Disk tối thiểu 40GB cho `/u01`
+- File `LINUX.X64_213000_db_home.zip` có sẵn tại `/root/OracleDb21c-OracleLinux9/` trên **từng máy**
 
-| | Primary | Standby |
-|---|---|---|
-| IP | 192.168.1.195 | 192.168.1.196 |
-| DB_UNIQUE_NAME | ORCL | ORCL_STBY |
-| DB_NAME | ORCL | ORCL |
+---
 
-### Yêu cầu
-- `install_oracle21c_FINAL.yml` đã chạy xong trên **cả 2 server**
-- Cả 2 server có thể ping nhau qua port 1521
+## Thứ tự chạy
 
-### Bước 1 — Chạy trên Primary (192.168.1.195)
+### Bước 1 — Cài Primary (192.168.1.195)
+
 ```bash
-ansible-playbook setup_primary.yml
+ansible-playbook -i inventory.ini install_oracle21c_primary.yml --limit primary
 ```
-> Playbook tự động generate SSH key (`/root/.ssh/id_rsa`) và copy sang server 196
-> bằng `ssh-copy-id`. Lần đầu chạy sẽ hỏi password root của server 196 **1 lần duy nhất**.
-> Các lần sau SSH key đã có sẵn, không hỏi gì thêm.
 
-Playbook này thực hiện:
-- Generate SSH key trên Primary + copy sang Standby (1 lần)
-- Bật ARCHIVELOG mode
-- Bật Force Logging + Flashback
-- Tạo Fast Recovery Area
+Thực hiện: cài OS packages, Oracle software, tạo CDB+PDB, listener, systemd service.
+Thời gian: ~45-60 phút.
+
+---
+
+### Bước 2 — Cài Standby (192.168.1.196)
+
+```bash
+ansible-playbook -i inventory.ini install_oracle21c_standby.yml --limit standby
+```
+
+Thực hiện: cài OS packages, Oracle software (chỉ software, **không tạo DB**), listener, init.ora tối thiểu.
+Thời gian: ~20-30 phút.
+
+---
+
+### Bước 3 — Setup Data Guard trên Primary
+
+```bash
+ansible-playbook -i inventory.ini setup_primary.yml --limit primary \
+  -e "standby_root_password=<PASSWORD_ROOT_MAY_196>"
+```
+
+Thực hiện:
+- Generate SSH key trên Primary + copy sang Standby (dùng `standby_root_password` 1 lần duy nhất)
+- Bật ARCHIVELOG mode + Force Logging + Flashback
 - Tạo Standby Redo Logs
-- Cấu hình Data Guard init parameters
 - Cấu hình tnsnames.ora + listener.ora
-- Copy password file sang Standby (192.168.1.196) qua `scp`
+- Set DG_BROKER_CONFIG_FILE trong SPFILE
+- Copy password file sang Standby qua `scp`
 
-### Bước 2 — Chạy trên Standby (192.168.1.196)
+---
+
+### Bước 4 — Setup Standby (RMAN Duplicate)
+
 ```bash
-ansible-playbook setup_standby.yml
+ansible-playbook -i inventory.ini setup_standby.yml --limit standby
 ```
 
-Playbook này thực hiện:
-- Verify password file đã nhận từ Primary
-- Cấu hình tnsnames.ora + listener.ora
-- Shutdown DB, startup NOMOUNT
+Thực hiện:
+- Cấu hình tnsnames.ora + listener.ora trên Standby
+- Startup NOMOUNT
 - RMAN Duplicate từ Primary (20-60 phút)
-- Bật DG Broker
-- Tạo Broker configuration
-- Validate toàn bộ cấu hình
+- Set DG_BROKER_CONFIG_FILE trong SPFILE của Standby
+- Add Standby Redo Logs
+- Bật DG_BROKER_START + MRP
 
-### Kiểm tra sau khi hoàn tất
+---
+
+### Bước 5 — Tạo DG Broker Configuration (trên Primary)
+
 ```bash
-# Trên bất kỳ server nào
-su - oracle -c "dgmgrl / " << EOF
-SHOW CONFIGURATION;
-SHOW DATABASE VERBOSE 'ORCL';
-SHOW DATABASE VERBOSE 'ORCL_STBY';
-EOF
+ansible-playbook -i inventory.ini setup_primary.yml --limit primary --tags broker
+```
+
+Thực hiện: tạo Broker config, ADD standby database, ENABLE CONFIGURATION, SHOW CONFIGURATION.
+
+---
+
+## Kiểm tra sau khi hoàn tất
+
+```bash
+# Trên Primary
+su - oracle -c "dgmgrl sys/Oracle_4U@ORCL 'show configuration'"
+su - oracle -c "dgmgrl sys/Oracle_4U@ORCL 'show database verbose ORCL'"
+su - oracle -c "dgmgrl sys/Oracle_4U@ORCL 'show database verbose ORCL_STBY'"
 ```
 
 Kết quả mong đợi:
@@ -145,61 +121,50 @@ Fast-Start Failover:  Disabled
 Configuration Status: SUCCESS
 ```
 
-### Switchover (chuyển đổi có kiểm soát)
+---
+
+## Switchover
+
 ```bash
-su - oracle -c "dgmgrl / " << EOF
--- Kiểm tra trước khi switchover
-VALIDATE DATABASE VERBOSE 'ORCL_STBY';
-
--- Thực hiện switchover
-SWITCHOVER TO 'ORCL_STBY';
-
--- Kiểm tra sau switchover
-SHOW CONFIGURATION;
-EOF
-```
-
-### Run Specific Data Guard Steps
-```bash
-# Chỉ setup SSH key
-ansible-playbook setup_primary.yml --tags "ssh_setup"
-
-# Chỉ bật archivelog
-ansible-playbook setup_primary.yml --tags "archivelog"
-
-# Chỉ chạy RMAN duplicate
-ansible-playbook setup_standby.yml --tags "rman"
-
-# Chỉ validate
-ansible-playbook setup_standby.yml --tags "validate"
+su - oracle -c "dgmgrl sys/Oracle_4U@ORCL 'validate database verbose ORCL_STBY'"
+su - oracle -c "dgmgrl sys/Oracle_4U@ORCL 'switchover to ORCL_STBY'"
+su - oracle -c "dgmgrl sys/Oracle_4U@ORCL 'show configuration'"
 ```
 
 ---
 
-## Complete Cleanup
-```bash
-# Remove everything (keeps ZIP file)
-ansible-playbook cleanup_oracle21c.yml
+## Cleanup
 
-# After cleanup, you can run fresh install again
-ansible-playbook install_oracle21c_FINAL.yml
+```bash
+# Xóa cả 2 máy
+ansible-playbook -i inventory.ini cleanup_oracle21c.yml
+
+# Chỉ xóa Primary
+ansible-playbook -i inventory.ini cleanup_oracle21c.yml --limit primary
+
+# Chỉ xóa Standby
+ansible-playbook -i inventory.ini cleanup_oracle21c.yml --limit standby
 ```
 
-## Management Commands
+---
+
+## Quản lý hàng ngày
+
 ```bash
 # Start/Stop database
 systemctl start oracle-db
 systemctl stop oracle-db
 systemctl status oracle-db
 
-# Check listener
+# Listener
 su - oracle -c "lsnrctl status"
+su - oracle -c "lsnrctl start"
 
-# Login as SYSDBA
+# Login SYSDBA
 su - oracle -c "sqlplus / as sysdba"
 
-# Check PDB status
-su - oracle -c "sqlplus / as sysdba" << EOF
+# Kiểm tra PDB
+su - oracle -c "sqlplus / as sysdba" << 'EOF'
 SHOW PDBS;
 EXIT;
 EOF
@@ -208,82 +173,38 @@ EOF
 su - oracle -c "sqlplus chirag/Tiger123@localhost:1521/orclpdb1"
 ```
 
-## SQL Developer Connection
+---
+
+## Thông tin kết nối (mặc định)
+
 ```
-Connection Type: Basic
-Hostname: <your-server-ip>
-Port: 1521
-Service name: orclpdb1
-Username: chirag
-Password: Tiger123
+Port         : 1521
+CDB SID      : ORCL
+PDB Service  : orclpdb1
+User         : chirag / Tiger123
+SYS Password : Oracle_4U
 ```
 
-## Features
-✅ Fully idempotent - safe to run multiple times
-✅ Automatic IP detection - portable across servers
-✅ Complete error handling and validation
-✅ Auto-start on system boot
-✅ Production-ready configuration
-✅ Silent installation (no GUI required)
-✅ Data Guard Physical Standby support
+---
 
 ## Troubleshooting
-### Check installation logs
+
 ```bash
 # Ansible log
-tail -f /var/log/oracle_install/ansible.log
+tail -f ./ansible.log
 
-# Database alert log
+# Alert log Primary
 tail -f /u01/app/oracle/diag/rdbms/orcl/ORCL/trace/alert_ORCL.log
 
-# Listener log
-tail -f /u01/app/oracle/diag/tnslsnr/oracledb/listener/alert/log.xml
-```
+# Alert log Standby
+tail -f /u01/app/oracle/diag/rdbms/orcl_stby/ORCL/trace/alert_ORCL.log
 
-### Verify database status
-```bash
-su - oracle -c "
-sqlplus / as sysdba << EOF
-SELECT status FROM v\$instance;
-SELECT name, open_mode FROM v\$pdbs;
+# Kiểm tra MRP trên Standby
+su - oracle -c "sqlplus / as sysdba" << 'EOF'
+SELECT PROCESS, STATUS, SEQUENCE# FROM V$MANAGED_STANDBY WHERE PROCESS IN ('MRP0','RFS');
 EXIT;
 EOF
-"
+
+# Apply lag / Transport lag
+su - oracle -c "dgmgrl sys/Oracle_4U@ORCL 'show database ORCL_STBY'"
 ```
-
-### Check listener services
-```bash
-su - oracle -c "lsnrctl status" | grep -i service
-```
-
-### Data Guard troubleshooting
-```bash
-# Kiểm tra apply lag
-su - oracle -c "dgmgrl / " << EOF
-SHOW DATABASE 'ORCL_STBY' 'ApplyLag';
-SHOW DATABASE 'ORCL_STBY' 'TransportLag';
-EOF
-
-# Kiểm tra MRP process trên Standby
-su - oracle -c "sqlplus / as sysdba" << EOF
-SELECT PROCESS, STATUS, SEQUENCE# FROM V\$MANAGED_STANDBY WHERE PROCESS='MRP0';
-EOF
-
-# Xem alert log Data Guard
-tail -100 /u01/app/oracle/diag/rdbms/orcl_stby/ORCL/trace/alert_ORCL.log
-```
-
-## Files Modified by Installation
-- `/etc/oratab` - Database registry
-- `/etc/systemd/system/oracle-db.service` - Auto-start service
-- `/etc/hosts` - Hostname resolution
-- `/root/.bash_profile` - Oracle environment
-- `/home/oracle/.bash_profile` - Oracle user environment
-
-## License
-Oracle Database software is licensed by Oracle Corporation.
-This Ansible playbook is provided as-is for automation purposes.
-
-## Author
-Created: March 2026
-Version: 1.1 - Data Guard Support

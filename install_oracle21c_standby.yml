@@ -15,8 +15,7 @@
 # [FIX-7] systemd service chạy as root
 ---
 - name: Install Oracle Database 21c on Oracle Linux 9 - STANDBY
-  hosts: localhost
-  connection: local
+  hosts: standby
   become: yes
   vars:
     oracle_base: /u01/app/oracle
@@ -27,9 +26,9 @@
     sys_password: "Oracle_4U"
     hostname_fqdn: standbydb.local                   # [FIX-1] Khác với primary (primarydb.local)
     hostname_short: standbydb
+    primary_ip: 192.168.1.195                        # IP của Primary server
     listener_port: 1521
-    zip_file_local: "./LINUX.X64_213000_db_home.zip"
-    zip_file_remote: "/tmp/LINUX.X64_213000_db_home.zip"
+    zip_file_remote: "/root/OracleDb21c-OracleLinux9/LINUX.X64_213000_db_home.zip"
     cv_assume_distid: "OEL8.4"
     fra_dest: /u01/app/oracle/fast_recovery_area
 
@@ -225,22 +224,7 @@
     # ==========================================
     # STEP 2: Extract Software
     # ==========================================
-    - name: "STEP 2.1: Check ZIP locally"
-      stat:
-        path: "{{ zip_file_local }}"
-      delegate_to: localhost
-      become: no
-      register: zip_local
-      tags: [software]
-
-    - name: "STEP 2.2: Upload ZIP"
-      copy:
-        src: "{{ zip_file_local }}"
-        dest: "{{ zip_file_remote }}"
-      when: zip_local.stat.exists
-      tags: [software]
-
-    - name: "STEP 2.2: Verify ZIP"
+    - name: "STEP 2.1: Verify ZIP on remote"
       stat:
         path: "{{ zip_file_remote }}"
       register: zip_remote
@@ -311,6 +295,51 @@
         regexp: '^LDFLAGS='
         line: 'LDFLAGS= -lnsl '
         backrefs: yes
+      tags: [compatibility]
+
+    - name: "STEP 3.4: Create stat_wrap.c"
+      copy:
+        dest: /tmp/stat_wrap.c
+        content: |
+          #define _GNU_SOURCE
+          #include <sys/stat.h>
+          #include <sys/types.h>
+          #include <unistd.h>
+          #include <fcntl.h>
+          int stat(const char *path, struct stat *buf) {
+              return syscall(4, path, buf);
+          }
+          int fstat(int fd, struct stat *buf) {
+              return syscall(5, fd, buf);
+          }
+      tags: [compatibility]
+
+    - name: "STEP 3.4: Compile stat_wrap"
+      shell: gcc -c /tmp/stat_wrap.c -o /tmp/stat_wrap.o
+      args:
+        creates: /tmp/stat_wrap.o
+      tags: [compatibility]
+
+    - name: "STEP 3.4: Check injection libnnzst"
+      stat:
+        path: "{{ oracle_home }}/lib/libnnzst.a"
+      register: stat_nnzst
+      tags: [compatibility]
+
+    - name: "STEP 3.4: Inject libnnzst"
+      shell: ar r {{ oracle_home }}/lib/libnnzst.a /tmp/stat_wrap.o
+      when: stat_nnzst.stat.exists
+      tags: [compatibility]
+
+    - name: "STEP 3.4: Check injection libjavavm"
+      stat:
+        path: "{{ oracle_home }}/lib/libjavavm.a"
+      register: stat_javavm
+      tags: [compatibility]
+
+    - name: "STEP 3.4: Inject libjavavm"
+      shell: ar r {{ oracle_home }}/lib/libjavavm.a /tmp/stat_wrap.o
+      when: stat_javavm.stat.exists
       tags: [compatibility]
 
     # ==========================================
@@ -399,65 +428,6 @@
       when: rootsh.stat.exists
       tags: [install]
 
-    # STEP 3.4 chạy SAU root.sh vì lib/ chỉ tồn tại sau khi root.sh tạo ra
-    # (Oracle 21c read-only home — lib/ không có trong ZIP, được tạo khi root.sh chạy)
-    - name: "STEP 3.4: Check lib directory tồn tại (sau root.sh)"
-      stat:
-        path: "{{ oracle_home }}/lib"
-      register: lib_dir
-      tags: [compatibility]
-
-    - name: "STEP 3.4: Create stat_wrap.c"
-      copy:
-        dest: /tmp/stat_wrap.c
-        content: |
-          #define _GNU_SOURCE
-          #include <sys/stat.h>
-          #include <sys/types.h>
-          #include <unistd.h>
-          #include <fcntl.h>
-          int stat(const char *path, struct stat *buf) {
-              return syscall(4, path, buf);
-          }
-          int fstat(int fd, struct stat *buf) {
-              return syscall(5, fd, buf);
-          }
-      when: lib_dir.stat.exists
-      tags: [compatibility]
-
-    - name: "STEP 3.4: Compile stat_wrap"
-      shell: gcc -c /tmp/stat_wrap.c -o /tmp/stat_wrap.o
-      args:
-        creates: /tmp/stat_wrap.o
-      when: lib_dir.stat.exists
-      tags: [compatibility]
-
-    - name: "STEP 3.4: Check injection libnnzst"
-      stat:
-        path: "{{ oracle_home }}/lib/libnnzst.a"
-      register: stat_nnzst
-      tags: [compatibility]
-
-    - name: "STEP 3.4: Inject libnnzst (nếu tồn tại)"
-      shell: ar r {{ oracle_home }}/lib/libnnzst.a /tmp/stat_wrap.o
-      when:
-        - lib_dir.stat.exists
-        - stat_nnzst.stat.exists
-      tags: [compatibility]
-
-    - name: "STEP 3.4: Check injection libjavavm"
-      stat:
-        path: "{{ oracle_home }}/lib/libjavavm.a"
-      register: stat_javavm
-      tags: [compatibility]
-
-    - name: "STEP 3.4: Inject libjavavm (nếu tồn tại)"
-      shell: ar r {{ oracle_home }}/lib/libjavavm.a /tmp/stat_wrap.o
-      when:
-        - lib_dir.stat.exists
-        - stat_javavm.stat.exists
-      tags: [compatibility]
-
     # [FIX-6] oradism suid
     - name: "STEP 4.4: Fix oradism suid permission"
       file:
@@ -542,7 +512,7 @@
         content: |
           ORCL =
             (DESCRIPTION =
-              (ADDRESS = (PROTOCOL = TCP)(HOST = 192.168.1.195)(PORT = {{ listener_port }}))
+              (ADDRESS = (PROTOCOL = TCP)(HOST = {{ primary_ip }})(PORT = {{ listener_port }}))
               (CONNECT_DATA = (SID = {{ oracle_sid }})))
 
           ORCL_STBY =

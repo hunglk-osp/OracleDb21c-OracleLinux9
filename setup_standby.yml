@@ -15,8 +15,7 @@
 # [FIX-6] Reload listener sau khi RMAN xong để đăng ký service mới
 ---
 - name: Setup Oracle Data Guard - Standby
-  hosts: localhost
-  connection: local
+  hosts: standby
   become: yes
   vars:
     oracle_home: /u01/app/oracle/product/21c/dbhome_1
@@ -113,14 +112,19 @@
         lsnrctl start
       tags: [network]
 
-    # [FIX-2] Tạo FRA directory trước khi RMAN dùng
-    - name: "STEP2: Create FRA directory"
+    # [FIX-2] Tạo FRA directory và adump trước khi RMAN dùng
+    - name: "STEP2: Create required directories"
       file:
-        path: "{{ fra_dest }}"
+        path: "{{ item }}"
         state: directory
         owner: oracle
         group: oinstall
         mode: '0755'
+      loop:
+        - "{{ fra_dest }}"
+        - "{{ oracle_base }}/admin/{{ oracle_sid }}/adump"
+        - "{{ oracle_base }}/admin/{{ oracle_sid }}/dpdump"
+        - "{{ oracle_base }}/admin/{{ oracle_sid }}/pfile"
       tags: [network, rman]
 
     # ==========================================
@@ -179,7 +183,7 @@
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
         sqlplus -s / as sysdba << 'EOF'
-        STARTUP NOMOUNT;
+        STARTUP NOMOUNT PFILE='{{ oracle_home }}/dbs/init{{ oracle_sid }}.ora';
         EOF
       when: "'PHYSICAL STANDBY' not in db_role.stdout"
       failed_when: false

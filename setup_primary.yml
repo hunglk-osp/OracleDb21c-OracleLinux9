@@ -15,8 +15,7 @@
 # [FIX-5] SHOW CONFIGURATION chạy sau khi broker ổn định hơn (wait 30s)
 ---
 - name: Setup Oracle Data Guard - Primary
-  hosts: localhost
-  connection: local
+  hosts: primary
   become: yes
   vars:
     oracle_home: /u01/app/oracle/product/21c/dbhome_1
@@ -30,36 +29,53 @@
     fra_dest: /u01/app/oracle/fast_recovery_area
     fra_size: 20G
     sys_password: "Oracle_4U"
+    srl_size_mb: 50   # phải khớp với size online redo log (MB)
+    # Mật khẩu root của standby server — dùng để copy SSH key lần đầu
+    # Sau khi key đã copy, có thể để trống hoặc xóa
+    # Truyền qua: -e "standby_root_password=<pass>" hoặc sửa trực tiếp ở đây
+    standby_root_password: ""     # <-- SỬA THÀNH MẬT KHẨU ROOT CỦA STANDBY
 
   tasks:
 
     # ==========================================
-    # SSH KEY SETUP
+    # SSH KEY SETUP (Primary → Standby, không hỏi password)
+    # Yêu cầu: sshpass đã được cài, hoặc SSH key đã được copy trước
     # ==========================================
-    - name: "SSH: Ensure .ssh directory"
+    - name: "SSH: Install sshpass"
+      dnf:
+        name: sshpass
+        state: present
+      failed_when: false
+      tags: [always]
+
+    - name: "SSH: Ensure .ssh directory on Primary"
       file:
         path: /root/.ssh
         state: directory
         mode: '0700'
       tags: [always]
 
-    - name: "SSH: Generate SSH key (nếu chưa có)"
+    - name: "SSH: Generate SSH key on Primary (nếu chưa có)"
       shell: ssh-keygen -t rsa -b 4096 -N "" -f /root/.ssh/id_rsa
       args:
         creates: /root/.ssh/id_rsa
       tags: [always]
 
-    - name: "SSH: Copy SSH key sang Standby (hỏi password 1 lần)"
+    - name: "SSH: Copy SSH key sang Standby bằng sshpass"
       shell: |
-        ssh-copy-id -o StrictHostKeyChecking=no root@{{ standby_ip }}
+        sshpass -p "{{ standby_root_password }}" \
+          ssh-copy-id -o StrictHostKeyChecking=no root@{{ standby_ip }}
         touch /root/.ssh/.ssh_copy_done_{{ standby_ip }}
       args:
         creates: /root/.ssh/.ssh_copy_done_{{ standby_ip }}
+      when: standby_root_password is defined and standby_root_password != ""
       tags: [always]
 
-    - name: "SSH: Verify"
+    - name: "SSH: Verify passwordless SSH sang Standby"
       shell: ssh -o StrictHostKeyChecking=no -o BatchMode=yes root@{{ standby_ip }} "echo OK"
+      register: ssh_verify
       changed_when: false
+      failed_when: ssh_verify.rc != 0
       tags: [always]
 
     # ==========================================
@@ -101,32 +117,6 @@
         ALTER DATABASE FLASHBACK ON;
         EOF
       failed_when: false
-      tags: [prepare]
-
-    - name: "STEP1: Check Standby Redo Logs"
-      become_user: oracle
-      shell: |
-        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        sqlplus -s / as sysdba << 'EOF'
-        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF
-        SELECT COUNT(*) FROM V$LOGFILE WHERE TYPE='STANDBY';
-        EOF
-      register: srl_count
-      changed_when: false
-      tags: [prepare]
-
-    - name: "STEP1: Add Standby Redo Logs (nếu chưa có)"
-      become_user: oracle
-      shell: |
-        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        sqlplus -s / as sysdba << 'EOF'
-        ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 10 SIZE 50M;
-        ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 11 SIZE 50M;
-        ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 12 SIZE 50M;
-        ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 13 SIZE 50M;
-        ALTER SYSTEM SET STANDBY_FILE_MANAGEMENT=AUTO SCOPE=BOTH;
-        EOF
-      when: "'0' in srl_count.stdout"
       tags: [prepare]
 
     # ==========================================
@@ -286,6 +276,46 @@
         seconds: 15
       tags: [broker]
 
+    - name: "STEP4: Check Standby Redo Logs"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+        SELECT COUNT(*) FROM V$STANDBY_LOG;
+        EXIT;
+        EOF
+      register: srl_count
+      changed_when: false
+      tags: [prepare, broker]
+
+    - name: "STEP4: Add Standby Redo Logs (nếu chưa đủ 4)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        WHENEVER SQLERROR EXIT SQL.SQLCODE
+        DECLARE
+          CURSOR c IS SELECT GROUP# FROM V$STANDBY_LOG;
+        BEGIN
+          FOR r IN c LOOP
+            BEGIN
+              EXECUTE IMMEDIATE 'ALTER DATABASE DROP STANDBY LOGFILE GROUP ' || r.GROUP#;
+            EXCEPTION WHEN OTHERS THEN NULL;
+            END;
+          END LOOP;
+        END;
+        /
+        ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 10 ('/u01/app/oracle/oradata/ORCL/srl_redo10.log') SIZE {{ srl_size_mb }}M;
+        ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 11 ('/u01/app/oracle/oradata/ORCL/srl_redo11.log') SIZE {{ srl_size_mb }}M;
+        ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 12 ('/u01/app/oracle/oradata/ORCL/srl_redo12.log') SIZE {{ srl_size_mb }}M;
+        ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 13 ('/u01/app/oracle/oradata/ORCL/srl_redo13.log') SIZE {{ srl_size_mb }}M;
+        ALTER SYSTEM SET STANDBY_FILE_MANAGEMENT=AUTO SCOPE=BOTH;
+        EXIT;
+        EOF
+      when: srl_count.stdout | trim != '4'
+      tags: [prepare, broker]
+
     # ==========================================
     # STEP 5: Configure DG Broker
     # Chỉ chạy sau khi setup_standby.yml xong (--tags broker)
@@ -296,7 +326,7 @@
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        dgmgrl / << 'EOF'
+        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'EOF'
         SHOW CONFIGURATION;
         EXIT;
         EOF
@@ -310,45 +340,24 @@
         msg: "{{ broker_check.stdout_lines }}"
       tags: [broker]
 
-    # Nếu broker chưa ready (ORA-16525), chờ thêm rồi thử lại
-    - name: "STEP5: Wait thêm nếu broker chưa ready (ORA-16525)"
-      pause:
-        seconds: 30
-      when: "'ORA-16525' in broker_check.stdout"
-      tags: [broker]
-
-    - name: "STEP5: Re-check sau khi chờ"
+    - name: "STEP5: Create Broker Configuration (chỉ khi chưa tồn tại)"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        dgmgrl / << 'EOF'
-        SHOW CONFIGURATION;
-        EXIT;
-        EOF
-      register: broker_check
-      failed_when: false
-      changed_when: false
-      when: "'ORA-16525' in broker_check.stdout"
-      tags: [broker]
-
-    - name: "STEP5: Create Broker Configuration (nếu chưa có)"
-      become_user: oracle
-      shell: |
-        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        dgmgrl / << 'EOF'
+        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'EOF'
         CREATE CONFIGURATION 'DG_{{ oracle_sid }}' AS
           PRIMARY DATABASE IS '{{ oracle_unique_name }}'
           CONNECT IDENTIFIER IS '{{ oracle_unique_name }}';
         EXIT;
         EOF
-      when: "'ORA-16532' in broker_check.stdout"
+      when: broker_check.stdout is defined and 'ORA-16532' in broker_check.stdout
       tags: [broker]
 
     - name: "STEP5: Check Standby đã ADD chưa"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        dgmgrl / << 'EOF'
+        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'EOF'
         SHOW DATABASE '{{ standby_unique_name }}';
         EXIT;
         EOF
@@ -361,7 +370,7 @@
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        dgmgrl / << 'EOF'
+        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'EOF'
         ADD DATABASE '{{ standby_unique_name }}'
           AS CONNECT IDENTIFIER IS '{{ standby_unique_name }}'
           MAINTAINED AS PHYSICAL;
@@ -369,8 +378,9 @@
         EXIT;
         EOF
       when: >
+        stby_check.stdout is defined and (
         'was not found' in stby_check.stdout or
-        'ORA-16532' in stby_check.stdout
+        'ORA-16532' in stby_check.stdout)
       tags: [broker]
 
     # [FIX-5] Chờ broker ổn định hơn trước khi SHOW
@@ -383,7 +393,7 @@
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        dgmgrl / << 'EOF'
+        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'EOF'
         SHOW CONFIGURATION;
         SHOW DATABASE VERBOSE '{{ oracle_unique_name }}';
         SHOW DATABASE VERBOSE '{{ standby_unique_name }}';
