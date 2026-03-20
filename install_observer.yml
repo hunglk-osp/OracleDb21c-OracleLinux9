@@ -1,0 +1,336 @@
+# install_observer.yml
+# Cài Oracle Instant Client + start FSFO Observer trên máy thứ 3 (Ubuntu)
+#
+# Yêu cầu:
+#   - setup_primary.yml + setup_standby.yml + setup_fsfo.yml đã chạy xong
+#   - SHOW CONFIGURATION phải SUCCESS trước khi chạy playbook này
+#
+# Chạy:
+#   ansible-playbook -i inventory.ini install_observer.yml
+#
+# Sau FSFO failover, reinstate:
+#   ansible-playbook -i inventory.ini setup_fsfo.yml --tags reinstate
+---
+- name: Install Oracle Instant Client + Start Observer
+  hosts: observer
+  become: yes
+  vars:
+    oracle_version: "21"
+    oracle_home_primary: /u01/app/oracle/product/21c/dbhome_1
+    primary_tns: ORCL
+    standby_tns: ORCL_STBY
+    primary_ip: 192.168.1.195
+    standby_ip: 192.168.1.196
+    listener_port: 1521
+    sys_password: "Oracle_4U"
+    observer_log_dir: /home/ubuntu/oracle-observer
+    observer_name: observer
+
+  tasks:
+
+    # ==========================================
+    # STEP 1: Cài Oracle Instant Client
+    # ==========================================
+    - name: "INSTALL: Add Oracle apt repository key"
+      apt_key:
+        url: https://apt.oracle.com/RPM-GPG-KEY-oracle-ol8
+        state: present
+      failed_when: false
+
+    - name: "INSTALL: Install dependencies"
+      apt:
+        name:
+          - libaio1
+          - alien
+          - wget
+          - curl
+        state: present
+        update_cache: yes
+
+    - name: "INSTALL: Check if Instant Client already installed"
+      stat:
+        path: /usr/lib/oracle/{{ oracle_version }}/client64/bin/dgmgrl
+      register: dgmgrl_stat
+
+    - name: "INSTALL: Download Oracle Instant Client Basic (RPM)"
+      get_url:
+        url: "https://download.oracle.com/otn_software/linux/instantclient/2115000/oracle-instantclient{{ oracle_version }}.1-basic-{{ oracle_version }}.1.0.0.0-1.x86_64.rpm"
+        dest: /tmp/oracle-instantclient-basic.rpm
+        timeout: 300
+      when: not dgmgrl_stat.stat.exists
+      register: ic_basic_download
+      failed_when: false
+
+    - name: "INSTALL: Download Oracle Instant Client SQLplus (RPM)"
+      get_url:
+        url: "https://download.oracle.com/otn_software/linux/instantclient/2115000/oracle-instantclient{{ oracle_version }}.1-sqlplus-{{ oracle_version }}.1.0.0.0-1.x86_64.rpm"
+        dest: /tmp/oracle-instantclient-sqlplus.rpm
+        timeout: 300
+      when: not dgmgrl_stat.stat.exists
+      register: ic_sqlplus_download
+      failed_when: false
+
+    - name: "INSTALL: Convert and install Basic RPM via alien"
+      shell: |
+        cd /tmp
+        alien --to-deb --scripts oracle-instantclient-basic.rpm
+        dpkg -i oracle-instantclient*.basic*.deb || apt-get install -f -y
+      when: not dgmgrl_stat.stat.exists and ic_basic_download is not failed
+      failed_when: false
+
+    - name: "INSTALL: Convert and install SQLplus RPM via alien"
+      shell: |
+        cd /tmp
+        alien --to-deb --scripts oracle-instantclient-sqlplus.rpm
+        dpkg -i oracle-instantclient*.sqlplus*.deb || apt-get install -f -y
+      when: not dgmgrl_stat.stat.exists and ic_sqlplus_download is not failed
+      failed_when: false
+
+    # Fallback: copy dgmgrl binary trực tiếp từ Primary nếu download thất bại
+    - name: "INSTALL: Check dgmgrl sau khi cài"
+      stat:
+        path: /usr/lib/oracle/{{ oracle_version }}/client64/bin/dgmgrl
+      register: dgmgrl_after_install
+
+    - name: "INSTALL: Copy dgmgrl + libs từ Primary (fallback nếu download thất bại)"
+      when: not dgmgrl_after_install.stat.exists
+      block:
+        - name: "INSTALL: Create oracle client dir"
+          file:
+            path: /opt/oracle/client/bin
+            state: directory
+            mode: '0755'
+
+        - name: "INSTALL: Fetch dgmgrl từ Primary"
+          fetch:
+            src: "{{ oracle_home_primary }}/bin/dgmgrl"
+            dest: /tmp/dgmgrl
+            flat: yes
+          delegate_to: primarydb
+
+        - name: "INSTALL: Copy dgmgrl lên observer"
+          copy:
+            src: /tmp/dgmgrl
+            dest: /opt/oracle/client/bin/dgmgrl
+            mode: '0755'
+
+        - name: "INSTALL: Fetch oracle libs từ Primary"
+          shell: |
+            tar czf /tmp/oracle_libs.tar.gz \
+              {{ oracle_home_primary }}/lib/libclntsh.so* \
+              {{ oracle_home_primary }}/lib/libclntshcore.so* \
+              {{ oracle_home_primary }}/lib/libnnz*.so* \
+              {{ oracle_home_primary }}/lib/libmql1.so \
+              {{ oracle_home_primary }}/lib/libipc1.so \
+              {{ oracle_home_primary }}/lib/libons.so \
+              2>/dev/null || true
+            echo done
+          delegate_to: primarydb
+
+        - name: "INSTALL: Fetch libs archive"
+          fetch:
+            src: /tmp/oracle_libs.tar.gz
+            dest: /tmp/oracle_libs.tar.gz
+            flat: yes
+          delegate_to: primarydb
+
+        - name: "INSTALL: Create lib dir"
+          file:
+            path: /opt/oracle/client/lib
+            state: directory
+            mode: '0755'
+
+        - name: "INSTALL: Extract libs"
+          shell: |
+            cd /opt/oracle/client/lib
+            tar xzf /tmp/oracle_libs.tar.gz --strip-components=5 2>/dev/null || \
+            tar xzf /tmp/oracle_libs.tar.gz 2>/dev/null || true
+
+        - name: "INSTALL: Configure ldconfig cho oracle libs"
+          shell: |
+            echo "/opt/oracle/client/lib" > /etc/ld.so.conf.d/oracle-client.conf
+            ldconfig
+
+    # ==========================================
+    # STEP 2: Tìm dgmgrl binary
+    # ==========================================
+    - name: "SETUP: Tìm dgmgrl binary"
+      shell: |
+        find /usr/lib/oracle /opt/oracle -name dgmgrl 2>/dev/null | head -1 || \
+        which dgmgrl 2>/dev/null || echo "NOT_FOUND"
+      register: dgmgrl_bin
+      changed_when: false
+
+    - name: "SETUP: Assert dgmgrl tìm thấy"
+      assert:
+        that: dgmgrl_bin.stdout != "NOT_FOUND"
+        fail_msg: |
+          Không tìm thấy dgmgrl! Cần cài Oracle Instant Client thủ công.
+          Download từ: https://www.oracle.com/database/technologies/instant-client/downloads.html
+          Chọn: Instant Client for Linux x86-64 → Basic + SQL*Plus packages
+
+    - name: "SETUP: Show dgmgrl path"
+      debug:
+        msg: "dgmgrl found at: {{ dgmgrl_bin.stdout }}"
+
+    # ==========================================
+    # STEP 3: Cấu hình tnsnames.ora
+    # ==========================================
+    - name: "SETUP: Tìm Oracle network admin dir"
+      shell: |
+        DGMGRL="{{ dgmgrl_bin.stdout }}"
+        ORACLE_DIR=$(dirname $(dirname $DGMGRL))
+        echo $ORACLE_DIR/network/admin
+      register: tns_dir
+      changed_when: false
+
+    - name: "SETUP: Create tnsnames directory"
+      file:
+        path: "{{ tns_dir.stdout }}"
+        state: directory
+        mode: '0755'
+
+    - name: "SETUP: Configure tnsnames.ora"
+      copy:
+        dest: "{{ tns_dir.stdout }}/tnsnames.ora"
+        content: |
+          ORCL =
+            (DESCRIPTION =
+              (ADDRESS_LIST =
+                (ADDRESS = (PROTOCOL = TCP)(HOST = {{ primary_ip }})(PORT = {{ listener_port }}))
+              )
+              (CONNECT_DATA = (SID = ORCL)))
+
+          ORCL_STBY =
+            (DESCRIPTION =
+              (ADDRESS_LIST =
+                (ADDRESS = (PROTOCOL = TCP)(HOST = {{ standby_ip }})(PORT = {{ listener_port }}))
+              )
+              (CONNECT_DATA = (SID = ORCL)))
+        mode: '0644'
+
+    # ==========================================
+    # STEP 4: Cấu hình environment
+    # ==========================================
+    - name: "SETUP: Create oracle environment profile"
+      copy:
+        dest: /etc/profile.d/oracle-observer.sh
+        content: |
+          # Oracle Observer environment
+          export ORACLE_HOME=$(dirname $(dirname {{ dgmgrl_bin.stdout }}))
+          export TNS_ADMIN={{ tns_dir.stdout }}
+          export PATH=$ORACLE_HOME/bin:$PATH
+          export LD_LIBRARY_PATH=$ORACLE_HOME/lib:$LD_LIBRARY_PATH
+        mode: '0644'
+
+    # ==========================================
+    # STEP 5: Stop observer cũ trong broker
+    # ==========================================
+    - name: "OBSERVER: Stop observer cũ trong broker"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home_primary }} ORACLE_SID=ORCL PATH={{ oracle_home_primary }}/bin:$PATH
+        printf "STOP OBSERVER {{ observer_name }}\nEXIT\n" | \
+          dgmgrl sys/{{ sys_password }}@{{ primary_tns }} 2>&1 || true
+      failed_when: false
+      delegate_to: primarydb
+
+    - name: "OBSERVER: Kill observer process cũ"
+      shell: pkill -9 -f "dgmgrl" || true
+      failed_when: false
+
+    - name: "OBSERVER: Wait for process to die"
+      pause:
+        seconds: 3
+
+    # ==========================================
+    # STEP 6: Start Observer
+    # ==========================================
+    - name: "OBSERVER: Create log directory"
+      file:
+        path: "{{ observer_log_dir }}"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: "OBSERVER: Start observer process"
+      become_user: ubuntu
+      shell: |
+        export ORACLE_HOME=$(dirname $(dirname {{ dgmgrl_bin.stdout }}))
+        export TNS_ADMIN={{ tns_dir.stdout }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        export LD_LIBRARY_PATH=$ORACLE_HOME/lib:$LD_LIBRARY_PATH
+        (echo "START OBSERVER {{ observer_name }}"; tail -f /dev/null) | \
+          nohup {{ dgmgrl_bin.stdout }} -silent sys/{{ sys_password }}@{{ primary_tns }} \
+          > {{ observer_log_dir }}/observer.log 2>&1 &
+        echo "Observer PID: $!"
+      async: 10
+      poll: 0
+
+    - name: "OBSERVER: Wait for observer to register"
+      pause:
+        seconds: 15
+
+    # ==========================================
+    # STEP 7: Verify
+    # ==========================================
+    - name: "VERIFY: Check observer process"
+      shell: ps -ef | grep dgmgrl | grep -v grep || echo "(not running)"
+      register: obs_proc
+      changed_when: false
+
+    - name: "VERIFY: Show observer process"
+      debug:
+        msg: "{{ obs_proc.stdout_lines }}"
+
+    - name: "VERIFY: Show observer log"
+      shell: cat {{ observer_log_dir }}/observer.log 2>/dev/null | tail -10 || echo "(no log yet)"
+      register: obs_log
+      changed_when: false
+
+    - name: "VERIFY: Display observer log"
+      debug:
+        msg: "{{ obs_log.stdout_lines }}"
+
+    - name: "VERIFY: Check FSFO configuration từ Primary"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home_primary }} ORACLE_SID=ORCL PATH={{ oracle_home_primary }}/bin:$PATH
+        printf "SHOW CONFIGURATION\nSHOW FAST_START FAILOVER\n" | \
+          dgmgrl sys/{{ sys_password }}@{{ primary_tns }} 2>&1
+      register: fsfo_status
+      changed_when: false
+      delegate_to: primarydb
+
+    - name: "VERIFY: Display FSFO status"
+      debug:
+        msg: "{{ fsfo_status.stdout_lines }}"
+
+    - name: "Summary"
+      debug:
+        msg:
+          - "====================================="
+          - "OBSERVER — 192.168.1.18 (Ubuntu)"
+          - "====================================="
+          - ""
+          - "dgmgrl  : {{ dgmgrl_bin.stdout }}"
+          - "Log     : {{ observer_log_dir }}/observer.log"
+          - "TNS     : {{ tns_dir.stdout }}/tnsnames.ora"
+          - ""
+          - "Kiến trúc:"
+          - "  195 (Primary)  ←→  196 (Standby)"
+          - "       ↑                   ↑"
+          - "       └──── 18 (Observer) ┘"
+          - ""
+          - "Kịch bản failover:"
+          - "  195 chết → Observer (18) detect → hỏi 196 xác nhận → 196 lên PRIMARY"
+          - "  Sau khi 195 lên lại → AutoReinstate → 195 thành Standby tự động"
+          - ""
+          - "Check log:"
+          - "  tail -f {{ observer_log_dir }}/observer.log"
+          - ""
+          - "Test failover:"
+          - "  systemctl stop oracle-db   (trên 195)"
+          - "  Chờ 30s → 196 tự lên PRIMARY"
+          - "====================================="
