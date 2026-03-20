@@ -183,104 +183,72 @@
       tags: [enable]
 
     # ==========================================
-    # STEP 5: Start 2 Observer (HA) — trên cả 2 server
+    # STEP 5: Start Observer trên máy thứ 3 (192.168.1.18)
     #
-    # Tại sao 2 observer?
-    #   Observer trên 195 (Primary)  → nếu 196 chết, observer 195 vẫn giám sát
-    #   Observer trên 196 (Standby)  → nếu 195 chết, observer 196 trigger failover
-    #
-    # Oracle tự chọn 1 làm "primary observer", còn lại là "backup observer"
-    # Nếu primary observer chết → backup tự lên thay
+    # Observer nằm độc lập — không trên Primary, không trên Standby
+    # Khi Primary chết → Observer thấy → hỏi Standby xác nhận → trigger failover
     # ==========================================
-    - name: "OBSERVER: Stop observers trong broker (xóa tên cũ)"
+    - name: "OBSERVER: Stop observer cũ trong broker"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        printf "STOP OBSERVER obs_standby\nSTOP OBSERVER obs_primary\nEXIT\n" | \
+        printf "STOP OBSERVER observer\nEXIT\n" | \
           dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} 2>&1 || true
       failed_when: false
       tags: [observer]
 
-    - name: "OBSERVER: Kill observer processes trên Primary (195)"
+    - name: "OBSERVER: Kill observer process cũ trên máy thứ 3"
       shell: pkill -f "dgmgrl" || true
+      delegate_to: observerdb
       failed_when: false
       tags: [observer]
 
-    - name: "OBSERVER: Kill observer processes trên Standby (196)"
-      shell: pkill -f "dgmgrl" || true
-      delegate_to: standbydb
-      failed_when: false
-      tags: [observer]
-
-    - name: "OBSERVER: Wait for processes to die"
+    - name: "OBSERVER: Wait for process to die"
       pause:
         seconds: 3
       tags: [observer]
 
-    - name: "OBSERVER: Create log directory trên Primary"
+    - name: "OBSERVER: Create log directory trên máy thứ 3"
       file:
-        path: /u01/app/oracle/log
+        path: /home/hunglk/oracle-observer
         state: directory
-        owner: oracle
-        group: oinstall
         mode: '0755'
+      delegate_to: observerdb
       tags: [observer]
 
-    - name: "OBSERVER: Create log directory trên Standby"
-      file:
-        path: /u01/app/oracle/log
-        state: directory
-        owner: oracle
-        group: oinstall
-        mode: '0755'
-      delegate_to: standbydb
-      tags: [observer]
-
-    # Observer 1: chạy trên STANDBY (196) — connect vào Primary
-    # Đây là observer quan trọng nhất: Primary chết → observer này trigger failover
-    # delegate_to standbydb để Ansible quản lý connection, không SSH thủ công
-    - name: "OBSERVER: Start obs_standby trên 196 (connect → Primary)"
-      become_user: oracle
+    - name: "OBSERVER: Install Oracle Instant Client (nếu chưa có)"
       shell: |
-        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        mkdir -p /u01/app/oracle/log
-        (echo "START OBSERVER obs_standby"; tail -f /dev/null) | \
-          nohup {{ oracle_home }}/bin/dgmgrl -silent sys/{{ sys_password }}@{{ oracle_unique_name }} \
-          > /u01/app/oracle/log/observer_standby.log 2>&1 &
+        which dgmgrl 2>/dev/null || \
+        find /opt /usr/local /home -name dgmgrl 2>/dev/null | head -1 || \
+        echo "NOT_FOUND"
+      delegate_to: observerdb
+      register: dgmgrl_path
+      changed_when: false
+      tags: [observer]
+
+    - name: "OBSERVER: Show dgmgrl path"
+      debug:
+        msg: "dgmgrl location: {{ dgmgrl_path.stdout }}"
+      tags: [observer]
+
+    - name: "OBSERVER: Start observer trên máy thứ 3 (192.168.1.18)"
+      shell: |
+        DGMGRL_BIN="{{ dgmgrl_path.stdout }}"
+        if [ "$DGMGRL_BIN" = "NOT_FOUND" ]; then
+          echo "ERROR: dgmgrl not found on observer machine"
+          exit 1
+        fi
+        mkdir -p /home/hunglk/oracle-observer
+        (echo "START OBSERVER observer"; tail -f /dev/null) | \
+          nohup $DGMGRL_BIN -silent sys/{{ sys_password }}@{{ oracle_unique_name }} \
+          > /home/hunglk/oracle-observer/observer.log 2>&1 &
         echo "Observer PID: $!"
-      delegate_to: standbydb
+      delegate_to: observerdb
       async: 10
       poll: 0
-      register: obs_standby_start
       tags: [observer]
 
-    - name: "OBSERVER: Show obs_standby result"
-      debug:
-        msg: "obs_standby started (async, PID will appear in log)"
-      tags: [observer]
-
-    # Observer 2: chạy trên PRIMARY (195) — backup observer
-    # Nếu Standby chết → observer trên Primary vẫn monitor
-    - name: "OBSERVER: Start obs_primary trên 195 (backup)"
-      become_user: oracle
-      shell: |
-        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        mkdir -p /u01/app/oracle/log
-        (echo "START OBSERVER obs_primary"; tail -f /dev/null) | \
-          nohup {{ oracle_home }}/bin/dgmgrl -silent sys/{{ sys_password }}@{{ oracle_unique_name }} \
-          > /u01/app/oracle/log/observer_primary.log 2>&1 &
-        echo "Observer PID: $!"
-      async: 10
-      poll: 0
-      register: obs_primary_start
-      tags: [observer]
-
-    - name: "OBSERVER: Show obs_primary result"
-      debug:
-        msg: "obs_primary started (async, PID will appear in log)"
-      tags: [observer]
-
-    - name: "OBSERVER: Wait for observers to register"
+    - name: "OBSERVER: Wait for observer to register"
       pause:
         seconds: 15
       tags: [observer]
@@ -288,24 +256,16 @@
     # ==========================================
     # STEP 6: Verify
     # ==========================================
-    - name: "VERIFY: Check observer process trên Primary"
-      shell: pgrep -a -f "dgmgrl" || echo "(không có)"
-      register: observer_proc_primary
+    - name: "VERIFY: Check observer process trên máy thứ 3"
+      shell: ps -ef | grep dgmgrl | grep -v grep || echo "(không có)"
+      delegate_to: observerdb
+      register: observer_proc
       changed_when: false
       tags: [observer, verify]
 
-    - name: "VERIFY: Check observer process trên Standby"
-      shell: pgrep -a -f "dgmgrl" || echo "(không có)"
-      delegate_to: standbydb
-      register: observer_proc_standby
-      changed_when: false
-      tags: [observer, verify]
-
-    - name: "VERIFY: Display observer processes"
+    - name: "VERIFY: Display observer process"
       debug:
-        msg:
-          - "=== PRIMARY (195) === {{ observer_proc_primary.stdout }}"
-          - "=== STANDBY (196) === {{ observer_proc_standby.stdout }}"
+        msg: "=== OBSERVER (192.168.1.18) === {{ observer_proc.stdout }}"
       tags: [observer, verify]
 
     - name: "VERIFY: Show FSFO configuration"
@@ -336,22 +296,20 @@
           - "Lag Limit   : {{ fsfo_lag_limit }}s"
           - "AutoReinstate: TRUE"
           - ""
-          - "Observers (HA):"
-          - "  obs_standby  → chạy trên 196 (Standby)"
-          - "  obs_primary  → chạy trên 195 (Primary)"
+          - "Observer:"
+          - "  observer → chạy trên 192.168.1.18 (máy thứ 3, độc lập)"
           - ""
           - "Kịch bản:"
-          - "  195 chết → obs_standby (196) trigger failover → 196 lên PRIMARY"
-          - "  196 chết → obs_primary (195) vẫn monitor → Primary 195 không bị ảnh hưởng"
-          - "  Cả 2 observer chết → FSFO tạm dừng, DB vẫn hoạt động bình thường"
+          - "  195 chết → observer (18) thấy mất kết nối → hỏi 196 xác nhận → 196 lên PRIMARY"
+          - "  196 chết → observer (18) vẫn monitor primary, không trigger failover"
+          - "  18 chết  → FSFO tạm dừng, DB vẫn hoạt động bình thường"
           - ""
           - "Check observer log:"
-          - "  195: tail -f /u01/app/oracle/log/observer_primary.log"
-          - "  196: ssh root@196 'tail -f /u01/app/oracle/log/observer_standby.log'"
+          - "  ssh hunglk@192.168.1.18 'tail -f ~/oracle-observer/observer.log'"
           - ""
           - "Test:"
           - "  1. uv run load_test.py"
-          - "  2. ssh root@192.168.1.195 'systemctl stop oracle-db'"
+          - "  2. systemctl stop oracle-db  (trên 195)"
           - "  3. Chờ ~{{ fsfo_threshold }}s → 196 tự lên PRIMARY"
           - "  4. load_test.py tự failover sang 196"
           - ""
@@ -411,34 +369,19 @@
         msg: "{{ reinstate_result.stdout_lines }}"
       tags: [reinstate]
 
-    - name: "REINSTATE: Restart HA observers trên cả 2 server"
+    - name: "REINSTATE: Restart observer trên máy thứ 3"
       shell: |
-        # Kill cũ
-        pkill -f "dgmgrl.*observer" || true
-        ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} \
-          "pkill -f 'dgmgrl.*observer' || true"
-        sleep 3
-
-        # Start observer trên 196
-        ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} "
-          su - oracle -c '
-            export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:\$PATH
-            (echo \"START OBSERVER obs_standby\"; tail -f /dev/null) | \
-              nohup {{ oracle_home }}/bin/dgmgrl -silent sys/{{ sys_password }}@{{ standby_unique_name }} \
-              > /u01/app/oracle/log/observer_standby.log 2>&1 &
-          '
-        "
-
-        # Start observer trên 195
-        su - oracle -c "
-          export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:\$PATH
-          (echo 'START OBSERVER obs_primary'; tail -f /dev/null) | \
-            nohup {{ oracle_home }}/bin/dgmgrl -silent sys/{{ sys_password }}@{{ standby_unique_name }} \
-            > /u01/app/oracle/log/observer_primary.log 2>&1 &
-        "
-        sleep 5
-        echo "HA Observers restarted on both servers"
-      register: observer_reinstate
+        pkill -f "dgmgrl" || true
+        sleep 2
+        mkdir -p /home/hunglk/oracle-observer
+        DGMGRL_BIN=$(find /opt /usr/local /home -name dgmgrl 2>/dev/null | head -1)
+        (echo "START OBSERVER observer"; tail -f /dev/null) | \
+          nohup $DGMGRL_BIN -silent sys/{{ sys_password }}@{{ oracle_unique_name }} \
+          > /home/hunglk/oracle-observer/observer.log 2>&1 &
+        echo "Observer restarted PID: $!"
+      delegate_to: observerdb
+      async: 10
+      poll: 0
       failed_when: false
       tags: [reinstate]
 
