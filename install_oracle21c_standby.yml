@@ -615,8 +615,62 @@
         line: "{{ oracle_sid }}:{{ oracle_home }}:Y"
       tags: [autostart]
 
-    # [FIX-7] Service chạy as root
-    - name: "STEP 8.5: Create systemd service"
+    - name: "STEP 8.4: Fix dbstart/dbshut log permissions"
+      file:
+        path: "/u01/app/oracle/homes/OraDB21Home1/rdbms/log/{{ item }}"
+        owner: oracle
+        group: oinstall
+        mode: '0644'
+        state: touch
+      loop:
+        - startup.log
+        - shutdown.log
+      tags: [autostart]
+
+    - name: "STEP 8.4b: Fix oradism ACL to preserve SUID"
+      lineinfile:
+        path: "{{ oracle_home }}/install/acls/ss_oracle.rdbms.acl"
+        regexp: '^\d+\s+bin/oradism'
+        line: '4750    bin/oradism'
+      tags: [autostart]
+
+    # [FIX-7] Service chạy as oracle user, wrapper script để fix oradism SUID trước khi dbstart
+    - name: "STEP 8.5a: Create oracle-start wrapper"
+      copy:
+        dest: /usr/local/bin/oracle-start.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Fix oradism SUID before startup
+          chown root:oinstall {{ oracle_home }}/bin/oradism
+          chmod 4750 {{ oracle_home }}/bin/oradism
+          # Start listener
+          runuser -l oracle -c "lsnrctl start" || true
+          # Start database via sqlplus
+          runuser -l oracle -c "export ORACLE_SID={{ oracle_sid }}; sqlplus -s / as sysdba <<'EOSQL'
+          STARTUP MOUNT;
+          ALTER DATABASE OPEN{% if oracle_unique_name != oracle_sid %} READ ONLY{% endif %};
+          ALTER PLUGGABLE DATABASE ALL OPEN;
+          EXIT;
+          EOSQL"
+      tags: [autostart]
+
+    - name: "STEP 8.5b: Create oracle-stop wrapper"
+      copy:
+        dest: /usr/local/bin/oracle-stop.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Stop database
+          runuser -l oracle -c "export ORACLE_SID={{ oracle_sid }}; sqlplus -s / as sysdba <<'EOSQL'
+          SHUTDOWN IMMEDIATE;
+          EXIT;
+          EOSQL"
+          # Stop listener
+          runuser -l oracle -c "lsnrctl stop" || true
+      tags: [autostart]
+
+    - name: "STEP 8.5c: Create systemd service"
       copy:
         dest: /etc/systemd/system/oracle-db.service
         content: |
@@ -626,14 +680,12 @@
 
           [Service]
           Type=forking
-          Environment=ORACLE_HOME={{ oracle_home }}
-          Environment=ORACLE_SID={{ oracle_sid }}
-          Environment=ORACLE_BASE={{ oracle_base }}
-          ExecStartPre=/bin/bash -c 'chmod 4750 {{ oracle_home }}/bin/oradism && chown root:oinstall {{ oracle_home }}/bin/oradism'
-          ExecStart={{ oracle_home }}/bin/dbstart {{ oracle_home }}
-          ExecStop={{ oracle_home }}/bin/dbshut {{ oracle_home }}
+          ExecStart=/usr/local/bin/oracle-start.sh
+          ExecStop=/usr/local/bin/oracle-stop.sh
           RemainAfterExit=yes
           LimitMEMLOCK=infinity
+          TimeoutStartSec=600
+          TimeoutStopSec=600
 
           [Install]
           WantedBy=multi-user.target

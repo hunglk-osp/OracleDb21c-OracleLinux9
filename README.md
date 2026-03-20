@@ -150,18 +150,47 @@ ansible-playbook -i inventory.ini cleanup_oracle21c.yml --limit standby
 
 ## Quản lý hàng ngày
 
+### Start / Stop / Restart Oracle Database
+
+Sử dụng `systemctl` (khuyến nghị — đã được cấu hình sẵn bởi Ansible):
+
 ```bash
-# Start/Stop database
+# Start database + listener
 systemctl start oracle-db
+
+# Stop database + listener
 systemctl stop oracle-db
+
+# Restart
+systemctl restart oracle-db
+
+# Kiểm tra trạng thái
 systemctl status oracle-db
+
+# Xác nhận database đang chạy
+ps -ef | grep pmon
+# Phải thấy: oracle ... ora_pmon_ORCL
+```
+
+Service `oracle-db` thực hiện:
+- **Start**: fix oradism SUID → start listener → `STARTUP` database → open tất cả PDB
+- **Stop**: `SHUTDOWN IMMEDIATE` database → stop listener
+- **Primary**: database mở bình thường (`STARTUP`)
+- **Standby**: database mở `MOUNT` rồi `OPEN READ ONLY`
+- **Auto-start**: database tự bật khi server khởi động lại
+
+> **Lưu ý kỹ thuật**: Playbook tạo wrapper script `/usr/local/bin/oracle-start.sh` và `oracle-stop.sh` thay vì dùng `dbstart`/`dbshut` trực tiếp, vì Oracle 21c read-only home reset SUID bit của `oradism` khiến `dbstart` qua systemd bị lỗi `ORA-12791`.
+
+### Thao tác thủ công (nếu cần)
+
+```bash
+# Login SYSDBA
+su - oracle -c "sqlplus / as sysdba"
 
 # Listener
 su - oracle -c "lsnrctl status"
 su - oracle -c "lsnrctl start"
-
-# Login SYSDBA
-su - oracle -c "sqlplus / as sysdba"
+su - oracle -c "lsnrctl stop"
 
 # Kiểm tra PDB
 su - oracle -c "sqlplus / as sysdba" << 'EOF'

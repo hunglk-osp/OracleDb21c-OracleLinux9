@@ -107,16 +107,70 @@
       when: "'NOARCHIVELOG' in log_mode.stdout"
       tags: [prepare]
 
-    - name: "STEP1: Enable Force Logging và Flashback"
+    - name: "STEP1: Enable Force Logging"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
         sqlplus -s / as sysdba << 'EOF'
-        ALTER DATABASE FORCE LOGGING;
-        ALTER SYSTEM SWITCH LOGFILE;
-        ALTER DATABASE FLASHBACK ON;
+        SET HEADING OFF FEEDBACK OFF
+        DECLARE
+          v_mode VARCHAR2(20);
+        BEGIN
+          SELECT FORCE_LOGGING INTO v_mode FROM V$DATABASE;
+          IF v_mode != 'YES' THEN
+            EXECUTE IMMEDIATE 'ALTER DATABASE FORCE LOGGING';
+            EXECUTE IMMEDIATE 'ALTER SYSTEM SWITCH LOGFILE';
+          END IF;
+        END;
+        /
+        EXIT;
         EOF
-      failed_when: false
+      tags: [prepare]
+
+    - name: "STEP1: Create FRA directory"
+      file:
+        path: "{{ fra_dest }}"
+        state: directory
+        owner: oracle
+        group: oinstall
+        mode: '0755'
+      tags: [prepare]
+
+    - name: "STEP1: Enable FRA (required for Flashback)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        WHENEVER SQLERROR EXIT SQL.SQLCODE
+        ALTER SYSTEM SET DB_RECOVERY_FILE_DEST_SIZE=20G SCOPE=BOTH;
+        ALTER SYSTEM SET DB_RECOVERY_FILE_DEST='{{ fra_dest }}' SCOPE=BOTH;
+        EXIT;
+        EOF
+      tags: [prepare]
+
+    - name: "STEP1: Enable Flashback Database"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET HEADING OFF FEEDBACK OFF
+        SELECT 'SKIP' FROM DUAL WHERE (SELECT FLASHBACK_ON FROM V$DATABASE) = 'YES';
+        EXIT;
+        EOF
+      register: fb_check
+      changed_when: false
+      tags: [prepare]
+
+    - name: "STEP1: Turn on Flashback Database"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        WHENEVER SQLERROR EXIT SQL.SQLCODE
+        ALTER DATABASE FLASHBACK ON;
+        EXIT;
+        EOF
+      when: "'SKIP' not in fb_check.stdout"
       tags: [prepare]
 
     # ==========================================
