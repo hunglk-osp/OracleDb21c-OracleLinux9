@@ -99,6 +99,11 @@
                 (ORACLE_HOME = {{ oracle_home }})
                 (SID_NAME = {{ oracle_sid }})
               )
+              (SID_DESC =
+                (GLOBAL_DBNAME = orclpdb1)
+                (ORACLE_HOME = {{ oracle_home }})
+                (SID_NAME = {{ oracle_sid }})
+              )
             )
       register: listener_changed
       tags: [network]
@@ -312,8 +317,20 @@
       failed_when: false
       tags: [broker]
 
+    # Mở PDB và SAVE STATE để tự động mở lại sau mỗi lần restart
+    - name: "STEP4: Open PDB và save state"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        ALTER PLUGGABLE DATABASE ALL OPEN READ ONLY;
+        ALTER PLUGGABLE DATABASE ALL SAVE STATE;
+        EOF
+      failed_when: false
+      tags: [broker]
+
     # [FIX-6] Reload listener sau khi RMAN xong
-    # DB đã có service mới (ORCL_STBY), listener cần đăng ký lại
+    # DB đã có service mới (ORCL_STBY + orclpdb1), listener cần đăng ký lại
     - name: "STEP4: Reload listener để đăng ký service mới"
       become_user: oracle
       shell: |

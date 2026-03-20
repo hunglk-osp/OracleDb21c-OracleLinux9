@@ -1,3 +1,12 @@
-LINUX.X64_213000_db_home.zip 
+LINUX.X64_213000_db_home.zip
 oracle21c_playbook_final_20260317.tar.gz
 ansible.log
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.python-version
+
+# uv
+uv.lock
