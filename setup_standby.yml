@@ -130,6 +130,7 @@
         - "{{ oracle_base }}/admin/{{ oracle_sid }}/adump"
         - "{{ oracle_base }}/admin/{{ oracle_sid }}/dpdump"
         - "{{ oracle_base }}/admin/{{ oracle_sid }}/pfile"
+        - "{{ oracle_base }}/admin/{{ standby_unique_name }}/adump"
       tags: [network, rman]
 
     # ==========================================
@@ -290,7 +291,7 @@
         ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 12 SIZE 50M;
         ALTER DATABASE ADD STANDBY LOGFILE THREAD 1 GROUP 13 SIZE 50M;
         EOF
-      when: "'0' in stby_srl_count.stdout"
+      when: stby_srl_count.stdout | trim == '0'
       failed_when: false
       tags: [broker]
 

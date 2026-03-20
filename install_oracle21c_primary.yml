@@ -212,11 +212,18 @@
         server_ip: "{{ ansible_default_ipv4.address }}"
       tags: [os_prep, always]
 
-    - name: "STEP 1.6: Update /etc/hosts"
+    - name: "STEP 1.6: Update /etc/hosts (self)"
       lineinfile:
         path: /etc/hosts
         regexp: ".*{{ hostname_short }}.*"
         line: "{{ server_ip }}  {{ hostname_fqdn }}  {{ hostname_short }}"
+      tags: [os_prep]
+
+    - name: "STEP 1.6: Update /etc/hosts (standby cross-entry)"
+      lineinfile:
+        path: /etc/hosts
+        regexp: ".*standbydb.*"
+        line: "192.168.1.196  standbydb.local  standbydb"
       tags: [os_prep]
 
     # ==========================================

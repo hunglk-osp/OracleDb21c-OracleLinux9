@@ -214,11 +214,18 @@
         server_ip: "{{ ansible_default_ipv4.address }}"
       tags: [os_prep, always]
 
-    - name: "STEP 1.6: Update /etc/hosts"
+    - name: "STEP 1.6: Update /etc/hosts (self)"
       lineinfile:
         path: /etc/hosts
         regexp: ".*{{ hostname_short }}.*"
         line: "{{ server_ip }}  {{ hostname_fqdn }}  {{ hostname_short }}"
+      tags: [os_prep]
+
+    - name: "STEP 1.6: Update /etc/hosts (primary cross-entry)"
+      lineinfile:
+        path: /etc/hosts
+        regexp: ".*primarydb.*"
+        line: "192.168.1.195  primarydb.local  primarydb"
       tags: [os_prep]
 
     # ==========================================
@@ -320,26 +327,43 @@
         creates: /tmp/stat_wrap.o
       tags: [compatibility]
 
+    - name: "STEP 3.4: Check marker file (idempotent)"
+      stat:
+        path: "{{ oracle_home }}/lib/.stat_wrap_injected"
+      register: stat_wrap_marker
+      tags: [compatibility]
+
     - name: "STEP 3.4: Check injection libnnzst"
       stat:
         path: "{{ oracle_home }}/lib/libnnzst.a"
       register: stat_nnzst
+      when: not stat_wrap_marker.stat.exists
       tags: [compatibility]
 
     - name: "STEP 3.4: Inject libnnzst"
       shell: ar r {{ oracle_home }}/lib/libnnzst.a /tmp/stat_wrap.o
-      when: stat_nnzst.stat.exists
+      when: not stat_wrap_marker.stat.exists and stat_nnzst.stat.exists | default(false)
       tags: [compatibility]
 
     - name: "STEP 3.4: Check injection libjavavm"
       stat:
         path: "{{ oracle_home }}/lib/libjavavm.a"
       register: stat_javavm
+      when: not stat_wrap_marker.stat.exists
       tags: [compatibility]
 
     - name: "STEP 3.4: Inject libjavavm"
       shell: ar r {{ oracle_home }}/lib/libjavavm.a /tmp/stat_wrap.o
-      when: stat_javavm.stat.exists
+      when: not stat_wrap_marker.stat.exists and stat_javavm.stat.exists | default(false)
+      tags: [compatibility]
+
+    - name: "STEP 3.4: Create marker file"
+      file:
+        path: "{{ oracle_home }}/lib/.stat_wrap_injected"
+        state: touch
+        owner: oracle
+        group: oinstall
+      when: not stat_wrap_marker.stat.exists
       tags: [compatibility]
 
     # ==========================================
@@ -434,7 +458,7 @@
         path: "{{ oracle_home }}/bin/oradism"
         owner: root
         group: oinstall
-        mode: '4710'
+        mode: '4750'
       tags: [install, autostart]
 
     # ==========================================
@@ -575,7 +599,7 @@
         path: "{{ oracle_home }}/bin/oradism"
         owner: root
         group: oinstall
-        mode: '4710'
+        mode: '4750'
       tags: [autostart]
 
     - name: "STEP 8.3: Configure oratab"
@@ -599,7 +623,7 @@
           Environment=ORACLE_HOME={{ oracle_home }}
           Environment=ORACLE_SID={{ oracle_sid }}
           Environment=ORACLE_BASE={{ oracle_base }}
-          ExecStartPre=/bin/bash -c 'chmod 4710 {{ oracle_home }}/bin/oradism && chown root:oinstall {{ oracle_home }}/bin/oradism'
+          ExecStartPre=/bin/bash -c 'chmod 4750 {{ oracle_home }}/bin/oradism && chown root:oinstall {{ oracle_home }}/bin/oradism'
           ExecStart={{ oracle_home }}/bin/dbstart {{ oracle_home }}
           ExecStop={{ oracle_home }}/bin/dbshut {{ oracle_home }}
           RemainAfterExit=yes

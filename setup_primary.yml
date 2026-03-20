@@ -169,6 +169,11 @@
                 (ORACLE_HOME = {{ oracle_home }})
                 (SID_NAME = {{ oracle_sid }})
               )
+              (SID_DESC =
+                (GLOBAL_DBNAME = orclpdb1)
+                (ORACLE_HOME = {{ oracle_home }})
+                (SID_NAME = {{ oracle_sid }})
+              )
             )
       register: listener_changed
       tags: [network]

@@ -185,6 +185,89 @@ User         : chirag / Tiger123
 SYS Password : Oracle_4U
 ```
 
+### Kết nối DBeaver / SQL Client
+
+| | Primary | Standby |
+|---|---|---|
+| Host | 192.168.1.195 | 192.168.1.196 |
+| Port | 1521 | 1521 |
+| SID (CDB) | ORCL | ORCL |
+| Service (PDB) | orclpdb1 | orclpdb1 |
+| User thường | chirag / Tiger123 | chirag / Tiger123 (READ ONLY) |
+| SYS | sys / Oracle_4U (SYSDBA) | sys / Oracle_4U (SYSDBA) |
+
+> **Lưu ý Standby:** Connect vào CDB (`SID=ORCL`) trước, sau đó chạy `ALTER SESSION SET CONTAINER = ORCLPDB1` để xem data của `chirag`.
+
+---
+
+## Kiến trúc CDB / PDB
+
+```
+CDB (Container Database) = ORCL
+├── CDB$ROOT        ← SYS login vào đây (SID=ORCL)
+├── PDB$SEED        ← Template tạo PDB mới
+└── ORCLPDB1        ← Database thật, chứa data ứng dụng
+      └── Schema CHIRAG
+            └── Table: employees, ...
+```
+
+- **SYS** connect vào CDB → dùng `ALTER SESSION SET CONTAINER = ORCLPDB1` để vào PDB
+- **chirag** connect thẳng vào PDB qua service `orclpdb1`
+- Standby PDB luôn ở `READ ONLY`, không thể ghi
+
+---
+
+## Python Demo Scripts
+
+```bash
+cd /home/ubuntu/rnd/OracleDb21c-OracleLinux9
+
+# Demo CRUD cơ bản (connect Primary, tạo table, insert/update/delete, stored procedure)
+uv run oracle_demo.py
+
+# Kiểm tra sync giữa Primary và Standby
+uv run check_sync.py
+```
+
+Dependencies: `oracledb` (cài bằng `uv add oracledb`)
+
+---
+
+## Data Guard — Lưu ý quan trọng
+
+### Listener trên Standby
+Standby **không tự động** có service `orclpdb1` sau khi setup. Nếu cần connect trực tiếp vào PDB của Standby, chạy lại tag network:
+
+```bash
+ansible-playbook setup_standby.yml --tags network
+ansible-playbook setup_standby.yml --tags broker
+```
+
+Hoặc thủ công trên Standby:
+```bash
+su - oracle
+sqlplus / as sysdba
+```
+```sql
+ALTER PLUGGABLE DATABASE orclpdb1 OPEN READ ONLY;
+ALTER PLUGGABLE DATABASE orclpdb1 SAVE STATE;
+EXIT;
+```
+```bash
+lsnrctl reload
+```
+
+### Kiểm tra sync từ Primary
+```sql
+-- Xem archive log đang ship sang Standby
+SELECT DEST_ID, STATUS, TARGET, DESTINATION, ERROR
+FROM V$ARCHIVE_DEST
+WHERE TARGET = 'STANDBY' AND STATUS != 'INACTIVE';
+
+-- Sequence đang ở đâu
+SELECT THREAD#, MAX(SEQUENCE#) FROM V$LOG GROUP BY THREAD#;
+```
+
 ---
 
 ## Troubleshooting
