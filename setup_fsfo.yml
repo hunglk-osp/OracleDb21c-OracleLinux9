@@ -192,66 +192,92 @@
     # Oracle tự chọn 1 làm "primary observer", còn lại là "backup observer"
     # Nếu primary observer chết → backup tự lên thay
     # ==========================================
-    - name: "OBSERVER: Kill tất cả observer cũ trên cả 2 server"
+    - name: "OBSERVER: Stop observers trong broker (xóa tên cũ)"
+      become_user: oracle
       shell: |
-        pkill -f "dgmgrl.*observer" || true
-        ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} \
-          "pkill -f 'dgmgrl.*observer' || true"
-        sleep 2
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        printf "STOP OBSERVER obs_standby\nSTOP OBSERVER obs_primary\nEXIT\n" | \
+          dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} 2>&1 || true
       failed_when: false
       tags: [observer]
 
-    - name: "OBSERVER: Create log directory trên cả 2 server"
-      shell: |
-        mkdir -p /u01/app/oracle/log
-        chown oracle:oinstall /u01/app/oracle/log
-        ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} "
-          mkdir -p /u01/app/oracle/log
-          chown oracle:oinstall /u01/app/oracle/log
-        "
+    - name: "OBSERVER: Kill observer processes trên Primary (195)"
+      shell: pkill -f "dgmgrl" || true
+      failed_when: false
+      tags: [observer]
+
+    - name: "OBSERVER: Kill observer processes trên Standby (196)"
+      shell: pkill -f "dgmgrl" || true
+      delegate_to: standbydb
+      failed_when: false
+      tags: [observer]
+
+    - name: "OBSERVER: Wait for processes to die"
+      pause:
+        seconds: 3
+      tags: [observer]
+
+    - name: "OBSERVER: Create log directory trên Primary"
+      file:
+        path: /u01/app/oracle/log
+        state: directory
+        owner: oracle
+        group: oinstall
+        mode: '0755'
+      tags: [observer]
+
+    - name: "OBSERVER: Create log directory trên Standby"
+      file:
+        path: /u01/app/oracle/log
+        state: directory
+        owner: oracle
+        group: oinstall
+        mode: '0755'
+      delegate_to: standbydb
       tags: [observer]
 
     # Observer 1: chạy trên STANDBY (196) — connect vào Primary
     # Đây là observer quan trọng nhất: Primary chết → observer này trigger failover
-    # Dùng (echo CMD; tail -f /dev/null) để giữ stdin mở → observer không die
+    # delegate_to standbydb để Ansible quản lý connection, không SSH thủ công
     - name: "OBSERVER: Start obs_standby trên 196 (connect → Primary)"
+      become_user: oracle
       shell: |
-        ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} "
-          su - oracle -c '
-            export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:\$PATH
-            (echo \"START OBSERVER obs_standby\"; tail -f /dev/null) | \
-              nohup {{ oracle_home }}/bin/dgmgrl -silent sys/{{ sys_password }}@{{ oracle_unique_name }} \
-              > /u01/app/oracle/log/observer_standby.log 2>&1 &
-            sleep 3
-            echo \"Observer PID: \$!\"
-          '
-        "
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        mkdir -p /u01/app/oracle/log
+        (echo "START OBSERVER obs_standby"; tail -f /dev/null) | \
+          nohup {{ oracle_home }}/bin/dgmgrl -silent sys/{{ sys_password }}@{{ oracle_unique_name }} \
+          > /u01/app/oracle/log/observer_standby.log 2>&1 &
+        echo "Observer PID: $!"
+      delegate_to: standbydb
+      async: 10
+      poll: 0
       register: obs_standby_start
       tags: [observer]
 
     - name: "OBSERVER: Show obs_standby result"
       debug:
-        msg: "{{ obs_standby_start.stdout_lines }}"
+        msg: "obs_standby started (async, PID will appear in log)"
       tags: [observer]
 
     # Observer 2: chạy trên PRIMARY (195) — backup observer
     # Nếu Standby chết → observer trên Primary vẫn monitor
-    # Dùng (echo CMD; tail -f /dev/null) để giữ stdin mở → observer không die
     - name: "OBSERVER: Start obs_primary trên 195 (backup)"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        mkdir -p /u01/app/oracle/log
         (echo "START OBSERVER obs_primary"; tail -f /dev/null) | \
           nohup {{ oracle_home }}/bin/dgmgrl -silent sys/{{ sys_password }}@{{ oracle_unique_name }} \
           > /u01/app/oracle/log/observer_primary.log 2>&1 &
-        sleep 3
         echo "Observer PID: $!"
+      async: 10
+      poll: 0
       register: obs_primary_start
       tags: [observer]
 
     - name: "OBSERVER: Show obs_primary result"
       debug:
-        msg: "{{ obs_primary_start.stdout_lines }}"
+        msg: "obs_primary started (async, PID will appear in log)"
       tags: [observer]
 
     - name: "OBSERVER: Wait for observers to register"
@@ -262,21 +288,24 @@
     # ==========================================
     # STEP 6: Verify
     # ==========================================
-    - name: "VERIFY: Check observer processes trên cả 2 server"
-      shell: |
-        echo "=== Observer trên PRIMARY (195) ==="
-        pgrep -a -f "dgmgrl" || echo "  (không có)"
-        echo ""
-        echo "=== Observer trên STANDBY (196) ==="
-        ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} \
-          "pgrep -a -f 'dgmgrl' || echo '  (không có)'"
-      register: observer_proc
+    - name: "VERIFY: Check observer process trên Primary"
+      shell: pgrep -a -f "dgmgrl" || echo "(không có)"
+      register: observer_proc_primary
+      changed_when: false
+      tags: [observer, verify]
+
+    - name: "VERIFY: Check observer process trên Standby"
+      shell: pgrep -a -f "dgmgrl" || echo "(không có)"
+      delegate_to: standbydb
+      register: observer_proc_standby
       changed_when: false
       tags: [observer, verify]
 
     - name: "VERIFY: Display observer processes"
       debug:
-        msg: "{{ observer_proc.stdout_lines }}"
+        msg:
+          - "=== PRIMARY (195) === {{ observer_proc_primary.stdout }}"
+          - "=== STANDBY (196) === {{ observer_proc_standby.stdout }}"
       tags: [observer, verify]
 
     - name: "VERIFY: Show FSFO configuration"
