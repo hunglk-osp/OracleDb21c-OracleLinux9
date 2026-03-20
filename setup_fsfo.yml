@@ -213,15 +213,16 @@
 
     # Observer 1: chạy trên STANDBY (196) — connect vào Primary
     # Đây là observer quan trọng nhất: Primary chết → observer này trigger failover
+    # Dùng (echo CMD; tail -f /dev/null) để giữ stdin mở → observer không die
     - name: "OBSERVER: Start obs_standby trên 196 (connect → Primary)"
       shell: |
         ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} "
           su - oracle -c '
             export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:\$PATH
-            nohup dgmgrl -logfile /u01/app/oracle/log/observer.log \
-              sys/{{ sys_password }}@{{ oracle_unique_name }} \
-              \"START OBSERVER obs_standby IN BACKGROUND\" \
-              > /u01/app/oracle/log/observer_nohup.log 2>&1 &
+            (echo \"START OBSERVER obs_standby\"; tail -f /dev/null) | \
+              nohup {{ oracle_home }}/bin/dgmgrl -silent sys/{{ sys_password }}@{{ oracle_unique_name }} \
+              > /u01/app/oracle/log/observer_standby.log 2>&1 &
+            sleep 3
             echo \"Observer PID: \$!\"
           '
         "
@@ -235,14 +236,15 @@
 
     # Observer 2: chạy trên PRIMARY (195) — backup observer
     # Nếu Standby chết → observer trên Primary vẫn monitor
+    # Dùng (echo CMD; tail -f /dev/null) để giữ stdin mở → observer không die
     - name: "OBSERVER: Start obs_primary trên 195 (backup)"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        nohup dgmgrl -logfile /u01/app/oracle/log/observer.log \
-          sys/{{ sys_password }}@{{ oracle_unique_name }} \
-          "START OBSERVER obs_primary IN BACKGROUND" \
-          > /u01/app/oracle/log/observer_nohup.log 2>&1 &
+        (echo "START OBSERVER obs_primary"; tail -f /dev/null) | \
+          nohup {{ oracle_home }}/bin/dgmgrl -silent sys/{{ sys_password }}@{{ oracle_unique_name }} \
+          > /u01/app/oracle/log/observer_primary.log 2>&1 &
+        sleep 3
         echo "Observer PID: $!"
       register: obs_primary_start
       tags: [observer]
@@ -315,8 +317,8 @@
           - "  Cả 2 observer chết → FSFO tạm dừng, DB vẫn hoạt động bình thường"
           - ""
           - "Check observer log:"
-          - "  195: tail -f /u01/app/oracle/log/observer.log"
-          - "  196: ssh root@196 'tail -f /u01/app/oracle/log/observer.log'"
+          - "  195: tail -f /u01/app/oracle/log/observer_primary.log"
+          - "  196: ssh root@196 'tail -f /u01/app/oracle/log/observer_standby.log'"
           - ""
           - "Test:"
           - "  1. uv run load_test.py"
@@ -392,20 +394,18 @@
         ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} "
           su - oracle -c '
             export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:\$PATH
-            nohup dgmgrl -logfile /u01/app/oracle/log/observer.log \
-              sys/{{ sys_password }}@{{ standby_unique_name }} \
-              \"START OBSERVER obs_standby IN BACKGROUND\" \
-              > /u01/app/oracle/log/observer_nohup.log 2>&1 &
+            (echo \"START OBSERVER obs_standby\"; tail -f /dev/null) | \
+              nohup {{ oracle_home }}/bin/dgmgrl -silent sys/{{ sys_password }}@{{ standby_unique_name }} \
+              > /u01/app/oracle/log/observer_standby.log 2>&1 &
           '
         "
 
         # Start observer trên 195
         su - oracle -c "
           export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:\$PATH
-          nohup dgmgrl -logfile /u01/app/oracle/log/observer.log \
-            sys/{{ sys_password }}@{{ standby_unique_name }} \
-            'START OBSERVER obs_primary IN BACKGROUND' \
-            > /u01/app/oracle/log/observer_nohup.log 2>&1 &
+          (echo 'START OBSERVER obs_primary'; tail -f /dev/null) | \
+            nohup {{ oracle_home }}/bin/dgmgrl -silent sys/{{ sys_password }}@{{ standby_unique_name }} \
+            > /u01/app/oracle/log/observer_primary.log 2>&1 &
         "
         sleep 5
         echo "HA Observers restarted on both servers"
