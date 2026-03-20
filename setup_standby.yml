@@ -80,6 +80,7 @@
         dest: "{{ oracle_home }}/network/admin/listener.ora"
         owner: oracle
         group: oinstall
+        force: yes
         content: |
           LISTENER =
             (DESCRIPTION_LIST =
