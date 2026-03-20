@@ -1,0 +1,432 @@
+# setup_fsfo.yml
+# Enable Fast-Start Failover (FSFO) cho Oracle Data Guard
+#
+# Yêu cầu: setup_primary.yml + setup_standby.yml đã chạy xong
+#          SHOW CONFIGURATION phải là SUCCESS (không phải WARNING)
+#
+# Chạy trên Primary:
+#   ansible-playbook -i inventory.ini setup_fsfo.yml
+#
+# Workflow:
+#   1. Check Broker status
+#   2. Enable Flashback Database trên cả Primary và Standby
+#   3. Cấu hình FSFO properties
+#   4. Enable FastStartFailover
+#   5. Start 2 Observer (HA): obs_standby trên 196, obs_primary trên 195
+#
+# Observer HA (theo Oracle MAA best practice):
+#   - 2 observer trên 2 server khác nhau
+#   - Server nào chết → observer còn lại vẫn giám sát
+#   - Không cần máy thứ 3
+#
+# Sau FSFO xảy ra:
+#   - ansible-playbook -i inventory.ini setup_fsfo.yml --tags reinstate
+---
+- name: Enable Fast-Start Failover
+  hosts: primary
+  become: yes
+  vars:
+    oracle_home: /u01/app/oracle/product/21c/dbhome_1
+    oracle_base: /u01/app/oracle
+    oracle_sid: ORCL
+    oracle_unique_name: ORCL
+    standby_unique_name: ORCL_STBY
+    primary_ip: 192.168.1.195
+    standby_ip: 192.168.1.196
+    listener_port: 1521
+    sys_password: "Oracle_4U"
+    # Primary down bao lâu thì trigger failover (giây)
+    # Lab: 15-30s, Production: 30-60s
+    fsfo_threshold: 30
+    # Max data loss cho phép (giây). 0 = không giới hạn (MaxPerformance mode)
+    fsfo_lag_limit: 0
+
+  tasks:
+
+    # ==========================================
+    # STEP 1: Kiểm tra Broker status
+    # ==========================================
+    - name: "CHECK: Show Broker Configuration"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'EOF'
+        SHOW CONFIGURATION;
+        EOF
+      register: broker_status
+      failed_when: false
+      changed_when: false
+      tags: [always, check]
+
+    - name: "CHECK: Display Broker status"
+      debug:
+        msg: "{{ broker_status.stdout_lines }}"
+      tags: [always, check]
+
+    - name: "CHECK: Assert Broker is accessible"
+      assert:
+        that: broker_status.rc == 0
+        fail_msg: |
+          Broker không accessible! Kiểm tra:
+          1. DG_BROKER_START=TRUE trên cả Primary và Standby
+          2. tnsnames.ora đúng
+          3. Chạy setup_primary.yml --tags broker trước
+      tags: [always]
+
+    # ==========================================
+    # STEP 2: Enable Flashback Database (bắt buộc cho FSFO)
+    # Flashback cho phép reinstate old primary sau failover
+    # ==========================================
+    - name: "FLASH: Check Flashback trên Primary"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+        SELECT FLASHBACK_ON FROM V$DATABASE;
+        EXIT;
+        EOF
+      register: flash_primary
+      changed_when: false
+      tags: [flashback]
+
+    - name: "FLASH: Enable Flashback trên Primary (nếu chưa)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        ALTER DATABASE FLASHBACK ON;
+        EXIT;
+        EOF
+      when: "'YES' not in flash_primary.stdout"
+      tags: [flashback]
+
+    - name: "FLASH: Check Flashback trên Standby"
+      shell: |
+        ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} "
+          su - oracle -c '
+            export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:\$PATH
+            sqlplus -s / as sysdba << SQEOF
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+        SELECT FLASHBACK_ON FROM V\\\$DATABASE;
+        EXIT;
+        SQEOF'
+        "
+      register: flash_standby
+      failed_when: false
+      changed_when: false
+      tags: [flashback]
+
+    - name: "FLASH: Enable Flashback trên Standby"
+      shell: |
+        ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} "
+          su - oracle -c '
+            export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:\$PATH
+            sqlplus -s / as sysdba << SQEOF
+        ALTER DATABASE RECOVER MANAGED STANDBY DATABASE CANCEL;
+        ALTER DATABASE FLASHBACK ON;
+        ALTER DATABASE RECOVER MANAGED STANDBY DATABASE USING CURRENT LOGFILE DISCONNECT FROM SESSION;
+        EXIT;
+        SQEOF'
+        "
+      when: flash_standby.stdout is defined and 'YES' not in flash_standby.stdout
+      failed_when: false
+      tags: [flashback]
+
+    # ==========================================
+    # STEP 3: Cấu hình FSFO properties
+    # ==========================================
+    - name: "FSFO: Set FastStartFailoverThreshold = {{ fsfo_threshold }}s"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'EOF'
+        EDIT CONFIGURATION SET PROPERTY FastStartFailoverThreshold = {{ fsfo_threshold }};
+        EOF
+      tags: [configure]
+
+    - name: "FSFO: Set FastStartFailoverLagLimit = {{ fsfo_lag_limit }}"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'EOF'
+        EDIT CONFIGURATION SET PROPERTY FastStartFailoverLagLimit = {{ fsfo_lag_limit }};
+        EOF
+      tags: [configure]
+
+    - name: "FSFO: Set FastStartFailoverAutoReinstate = TRUE"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'EOF'
+        EDIT CONFIGURATION SET PROPERTY FastStartFailoverAutoReinstate = TRUE;
+        EOF
+      tags: [configure]
+
+    # ==========================================
+    # STEP 4: Enable FastStartFailover
+    # ==========================================
+    - name: "FSFO: Enable FastStartFailover"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'EOF'
+        ENABLE FAST_START FAILOVER;
+        EOF
+      register: fsfo_enable
+      failed_when: false
+      tags: [enable]
+
+    - name: "FSFO: Show enable result"
+      debug:
+        msg: "{{ fsfo_enable.stdout_lines }}"
+      tags: [enable]
+
+    # ==========================================
+    # STEP 5: Start 2 Observer (HA) — trên cả 2 server
+    #
+    # Tại sao 2 observer?
+    #   Observer trên 195 (Primary)  → nếu 196 chết, observer 195 vẫn giám sát
+    #   Observer trên 196 (Standby)  → nếu 195 chết, observer 196 trigger failover
+    #
+    # Oracle tự chọn 1 làm "primary observer", còn lại là "backup observer"
+    # Nếu primary observer chết → backup tự lên thay
+    # ==========================================
+    - name: "OBSERVER: Kill tất cả observer cũ trên cả 2 server"
+      shell: |
+        pkill -f "dgmgrl.*observer" || true
+        ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} \
+          "pkill -f 'dgmgrl.*observer' || true"
+        sleep 2
+      failed_when: false
+      tags: [observer]
+
+    - name: "OBSERVER: Create log directory trên cả 2 server"
+      shell: |
+        mkdir -p /u01/app/oracle/log
+        chown oracle:oinstall /u01/app/oracle/log
+        ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} "
+          mkdir -p /u01/app/oracle/log
+          chown oracle:oinstall /u01/app/oracle/log
+        "
+      tags: [observer]
+
+    # Observer 1: chạy trên STANDBY (196) — connect vào Primary
+    # Đây là observer quan trọng nhất: Primary chết → observer này trigger failover
+    - name: "OBSERVER: Start obs_standby trên 196 (connect → Primary)"
+      shell: |
+        ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} "
+          su - oracle -c '
+            export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:\$PATH
+            nohup dgmgrl -logfile /u01/app/oracle/log/observer.log \
+              sys/{{ sys_password }}@{{ oracle_unique_name }} \
+              \"START OBSERVER obs_standby IN BACKGROUND\" \
+              > /u01/app/oracle/log/observer_nohup.log 2>&1 &
+            echo \"Observer PID: \$!\"
+          '
+        "
+      register: obs_standby_start
+      tags: [observer]
+
+    - name: "OBSERVER: Show obs_standby result"
+      debug:
+        msg: "{{ obs_standby_start.stdout_lines }}"
+      tags: [observer]
+
+    # Observer 2: chạy trên PRIMARY (195) — backup observer
+    # Nếu Standby chết → observer trên Primary vẫn monitor
+    - name: "OBSERVER: Start obs_primary trên 195 (backup)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        nohup dgmgrl -logfile /u01/app/oracle/log/observer.log \
+          sys/{{ sys_password }}@{{ oracle_unique_name }} \
+          "START OBSERVER obs_primary IN BACKGROUND" \
+          > /u01/app/oracle/log/observer_nohup.log 2>&1 &
+        echo "Observer PID: $!"
+      register: obs_primary_start
+      tags: [observer]
+
+    - name: "OBSERVER: Show obs_primary result"
+      debug:
+        msg: "{{ obs_primary_start.stdout_lines }}"
+      tags: [observer]
+
+    - name: "OBSERVER: Wait for observers to register"
+      pause:
+        seconds: 15
+      tags: [observer]
+
+    # ==========================================
+    # STEP 6: Verify
+    # ==========================================
+    - name: "VERIFY: Check observer processes trên cả 2 server"
+      shell: |
+        echo "=== Observer trên PRIMARY (195) ==="
+        pgrep -a -f "dgmgrl" || echo "  (không có)"
+        echo ""
+        echo "=== Observer trên STANDBY (196) ==="
+        ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} \
+          "pgrep -a -f 'dgmgrl' || echo '  (không có)'"
+      register: observer_proc
+      changed_when: false
+      tags: [observer, verify]
+
+    - name: "VERIFY: Display observer processes"
+      debug:
+        msg: "{{ observer_proc.stdout_lines }}"
+      tags: [observer, verify]
+
+    - name: "VERIFY: Show FSFO configuration"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'EOF'
+        SHOW CONFIGURATION VERBOSE;
+        SHOW FAST_START FAILOVER;
+        EOF
+      register: fsfo_status
+      changed_when: false
+      tags: [verify]
+
+    - name: "VERIFY: Display FSFO status"
+      debug:
+        msg: "{{ fsfo_status.stdout_lines }}"
+      tags: [verify]
+
+    - name: "Summary"
+      debug:
+        msg:
+          - "====================================="
+          - "FAST-START FAILOVER — HA OBSERVERS"
+          - "====================================="
+          - ""
+          - "Threshold   : {{ fsfo_threshold }}s"
+          - "Lag Limit   : {{ fsfo_lag_limit }}s"
+          - "AutoReinstate: TRUE"
+          - ""
+          - "Observers (HA):"
+          - "  obs_standby  → chạy trên 196 (Standby)"
+          - "  obs_primary  → chạy trên 195 (Primary)"
+          - ""
+          - "Kịch bản:"
+          - "  195 chết → obs_standby (196) trigger failover → 196 lên PRIMARY"
+          - "  196 chết → obs_primary (195) vẫn monitor → Primary 195 không bị ảnh hưởng"
+          - "  Cả 2 observer chết → FSFO tạm dừng, DB vẫn hoạt động bình thường"
+          - ""
+          - "Check observer log:"
+          - "  195: tail -f /u01/app/oracle/log/observer.log"
+          - "  196: ssh root@196 'tail -f /u01/app/oracle/log/observer.log'"
+          - ""
+          - "Test:"
+          - "  1. uv run load_test.py"
+          - "  2. ssh root@192.168.1.195 'systemctl stop oracle-db'"
+          - "  3. Chờ ~{{ fsfo_threshold }}s → 196 tự lên PRIMARY"
+          - "  4. load_test.py tự failover sang 196"
+          - ""
+          - "Sau khi 195 lên lại (AutoReinstate=TRUE → tự reinstate):"
+          - "  Hoặc chạy thủ công: ansible-playbook setup_fsfo.yml --tags reinstate"
+          - "====================================="
+      tags: [always]
+
+# ==========================================
+# REINSTATE: Đưa old Primary trở lại thành Standby
+# Chạy sau khi FSFO đã xảy ra VÀ Primary 195 đã lên lại
+# Thường không cần vì FastStartFailoverAutoReinstate = TRUE
+# ==========================================
+- name: Reinstate old Primary sau FSFO
+  hosts: primary
+  become: yes
+  vars:
+    oracle_home: /u01/app/oracle/product/21c/dbhome_1
+    oracle_sid: ORCL
+    oracle_unique_name: ORCL
+    standby_unique_name: ORCL_STBY
+    primary_ip: 192.168.1.195
+    standby_ip: 192.168.1.196
+    sys_password: "Oracle_4U"
+  tasks:
+
+    - name: "REINSTATE: Show current configuration"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        dgmgrl sys/{{ sys_password }}@{{ standby_unique_name }} << 'EOF'
+        SHOW CONFIGURATION;
+        EOF
+      register: config_post
+      failed_when: false
+      changed_when: false
+      tags: [reinstate]
+
+    - name: "REINSTATE: Display config"
+      debug:
+        msg: "{{ config_post.stdout_lines }}"
+      tags: [reinstate]
+
+    - name: "REINSTATE: Reinstate database ORCL (old primary → standby)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        dgmgrl sys/{{ sys_password }}@{{ standby_unique_name }} << 'EOF'
+        REINSTATE DATABASE '{{ oracle_unique_name }}';
+        EOF
+      register: reinstate_result
+      failed_when: false
+      tags: [reinstate]
+
+    - name: "REINSTATE: Show result"
+      debug:
+        msg: "{{ reinstate_result.stdout_lines }}"
+      tags: [reinstate]
+
+    - name: "REINSTATE: Restart HA observers trên cả 2 server"
+      shell: |
+        # Kill cũ
+        pkill -f "dgmgrl.*observer" || true
+        ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} \
+          "pkill -f 'dgmgrl.*observer' || true"
+        sleep 3
+
+        # Start observer trên 196
+        ssh -o StrictHostKeyChecking=no root@{{ standby_ip }} "
+          su - oracle -c '
+            export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:\$PATH
+            nohup dgmgrl -logfile /u01/app/oracle/log/observer.log \
+              sys/{{ sys_password }}@{{ standby_unique_name }} \
+              \"START OBSERVER obs_standby IN BACKGROUND\" \
+              > /u01/app/oracle/log/observer_nohup.log 2>&1 &
+          '
+        "
+
+        # Start observer trên 195
+        su - oracle -c "
+          export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:\$PATH
+          nohup dgmgrl -logfile /u01/app/oracle/log/observer.log \
+            sys/{{ sys_password }}@{{ standby_unique_name }} \
+            'START OBSERVER obs_primary IN BACKGROUND' \
+            > /u01/app/oracle/log/observer_nohup.log 2>&1 &
+        "
+        sleep 5
+        echo "HA Observers restarted on both servers"
+      register: observer_reinstate
+      failed_when: false
+      tags: [reinstate]
+
+    - name: "REINSTATE: Verify final state"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        dgmgrl sys/{{ sys_password }}@{{ standby_unique_name }} << 'EOF'
+        SHOW CONFIGURATION;
+        SHOW FAST_START FAILOVER;
+        EOF
+      register: final_status
+      failed_when: false
+      changed_when: false
+      tags: [reinstate]
+
+    - name: "REINSTATE: Display final status"
+      debug:
+        msg: "{{ final_status.stdout_lines }}"
+      tags: [reinstate]
