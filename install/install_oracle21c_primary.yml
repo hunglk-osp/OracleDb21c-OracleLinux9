@@ -774,12 +774,26 @@
           # Fix oradism SUID before startup
           chown root:oinstall {{ oracle_home }}/bin/oradism
           chmod 4750 {{ oracle_home }}/bin/oradism
-          # Start listener
-          runuser -l oracle -c "lsnrctl start" || true
-          # Start database via sqlplus
-          runuser -l oracle -c "export ORACLE_SID={{ oracle_sid }}; sqlplus -s / as sysdba <<'EOSQL'
-          STARTUP;
-          ALTER PLUGGABLE DATABASE ALL OPEN;
+          # Start listener (static entries giúp Broker/Observer connect khi DB MOUNTED)
+          runuser -l oracle -c "{{ oracle_home }}/bin/lsnrctl start" || true
+          # Start database — detect role để open đúng cách
+          runuser -l oracle -c "export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:\$PATH; sqlplus -s / as sysdba <<'EOSQL'
+          STARTUP MOUNT;
+          DECLARE
+            v_role VARCHAR2(30);
+          BEGIN
+            SELECT DATABASE_ROLE INTO v_role FROM V\$DATABASE;
+            IF v_role = 'PRIMARY' THEN
+              EXECUTE IMMEDIATE 'ALTER DATABASE OPEN';
+              EXECUTE IMMEDIATE 'ALTER PLUGGABLE DATABASE ALL OPEN';
+            ELSE
+              -- Standby: open READ ONLY, start MRP
+              EXECUTE IMMEDIATE 'ALTER DATABASE OPEN READ ONLY';
+              EXECUTE IMMEDIATE 'ALTER PLUGGABLE DATABASE ALL OPEN READ ONLY';
+              EXECUTE IMMEDIATE 'ALTER DATABASE RECOVER MANAGED STANDBY DATABASE USING CURRENT LOGFILE DISCONNECT FROM SESSION';
+            END IF;
+          END;
+          /
           EXIT;
           EOSQL"
       tags: [autostart]

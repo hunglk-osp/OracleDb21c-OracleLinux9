@@ -135,14 +135,13 @@
         msg: "{{ fsfo_enable.stdout_lines }}"
       when: is_primary | bool
 
-    # ── Stop observer cũ (chạy trên Primary) ──
-    - name: "OBSERVER: Stop observer cũ trong broker"
+    # ── Stop observer cũ (chạy trên cả Primary lẫn Standby để đảm bảo clean) ──
+    - name: "OBSERVER: Stop observer cũ trong broker (cả 2 nodes)"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
         printf "STOP OBSERVER ALL;\nEXIT;\n" | \
           dgmgrl sys/{{ sys_password }}@{{ db_unique_name }} 2>&1 || true
-      when: is_primary | bool
       failed_when: false
 
     # ── Show config ──
@@ -325,30 +324,17 @@
       copy:
         dest: "{{ tns_dir.stdout }}/tnsnames.ora"
         content: |
-          # ORCL — trỏ cố định vào 195 (DB_UNIQUE_NAME = ORCL)
+          # ORCL — trỏ cố định vào 195 (SID tĩnh — connect được khi DB MOUNTED)
           ORCL =
             (DESCRIPTION =
               (ADDRESS = (PROTOCOL = TCP)(HOST = {{ primary_ip }})(PORT = {{ listener_port }}))
-              (CONNECT_DATA =
-                (SERVICE_NAME = ORCL_DGMGRL)
-                (INSTANCE_NAME = ORCL)))
+              (CONNECT_DATA = (SID = ORCL)))
 
-          # ORCL_STBY — trỏ cố định vào 196 (DB_UNIQUE_NAME = ORCL_STBY)
+          # ORCL_STBY — trỏ cố định vào 196 (SID tĩnh — connect được khi DB MOUNTED)
           ORCL_STBY =
             (DESCRIPTION =
               (ADDRESS = (PROTOCOL = TCP)(HOST = {{ standby_ip }})(PORT = {{ listener_port }}))
-              (CONNECT_DATA =
-                (SERVICE_NAME = ORCL_DGMGRL)
-                (INSTANCE_NAME = ORCL)))
-
-          # ORCL_PDB — service PDB (luôn trỏ Primary hiện tại qua failover)
-          ORCL_PDB =
-            (DESCRIPTION =
-              (FAILOVER = ON)
-              (ADDRESS_LIST =
-                (ADDRESS = (PROTOCOL = TCP)(HOST = {{ primary_ip }})(PORT = {{ listener_port }}))
-                (ADDRESS = (PROTOCOL = TCP)(HOST = {{ standby_ip }})(PORT = {{ listener_port }})))
-              (CONNECT_DATA = (SERVICE_NAME = orclpdb1)))
+              (CONNECT_DATA = (SID = ORCL)))
         mode: '0644'
 
     - name: "SETUP: Configure sqlnet.ora (short connect timeout)"
@@ -371,6 +357,7 @@
           export TNS_ADMIN={{ tns_dir.stdout }}
           export PATH=$ORACLE_CLIENT/bin:$PATH
           export LD_LIBRARY_PATH=$ORACLE_CLIENT/lib:${LD_LIBRARY_PATH:-}
+          export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
         mode: '0644'
 
     # ── Kill observer cũ (killall hoạt động trên Ubuntu) ──
@@ -423,6 +410,7 @@
           export TNS_ADMIN={{ tns_dir.stdout }}
           export PATH=$ORACLE_CLIENT/bin:$PATH
           export LD_LIBRARY_PATH=$ORACLE_CLIENT/lib:${LD_LIBRARY_PATH:-}
+          export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
 
           LOG_DIR="{{ observer_log_dir }}"
           DGMGRL="{{ dgmgrl_bin.stdout }}"
@@ -431,13 +419,9 @@
           # Detect PRIMARY hiện tại — thử ORCL (195) trước, rồi ORCL_STBY (196)
           CONNECT_STR=""
           for TNS_ALIAS in ORCL ORCL_STBY; do
-            ROLE=$(${SQLPLUS} -s sys/{{ sys_password }}@${TNS_ALIAS} as sysdba 2>/dev/null << 'SQLEOF'
-SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
-SELECT TRIM(DATABASE_ROLE)||'|'||TRIM(OPEN_MODE) FROM V$DATABASE;
-EXIT;
-SQLEOF
-            )
-            if echo "$ROLE" | grep -q 'PRIMARY|READ WRITE'; then
+            ROLE=$(printf 'SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF\nSELECT DATABASE_ROLE FROM V$DATABASE;\nEXIT;\n' | \
+              ${SQLPLUS} -s sys/{{ sys_password }}@${TNS_ALIAS} as sysdba 2>/dev/null)
+            if echo "$ROLE" | grep -q 'PRIMARY'; then
               CONNECT_STR="${TNS_ALIAS}"
               break
             fi
@@ -450,19 +434,62 @@ SQLEOF
 
           echo "$(date): Starting observer, PRIMARY = ${CONNECT_STR}" >> ${LOG_DIR}/observer.log
 
-          # Start observer — dùng file chứa command (tránh zombie pipe)
-          cat > /tmp/observer_cmd.dgmgrl << 'CMDEOF'
-          START OBSERVER {{ observer_name }} FILE IS '{{ observer_log_dir }}/fsfo.dat' LOGFILE IS '{{ observer_log_dir }}/observer_dgmgrl.log';
-          CMDEOF
+          # Wrapper loop: sau khi failover, observer exit — tự restart lại
+          cat > ${LOG_DIR}/run_observer.sh << 'RUNEOF'
+          #!/bin/bash
+          ORACLE_CLIENT=$(dirname $(dirname DGMGRL_BIN))
+          export ORACLE_HOME=$ORACLE_CLIENT
+          export TNS_ADMIN=TNS_ADMIN_DIR
+          export PATH=$ORACLE_CLIENT/bin:$PATH
+          export LD_LIBRARY_PATH=$ORACLE_CLIENT/lib:${LD_LIBRARY_PATH:-}
+          export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
+          DGMGRL=DGMGRL_BIN
+          SQLPLUS=$(dirname DGMGRL_BIN)/sqlplus
+          LOG_DIR=LOG_DIR_PATH
+          SYS_PASS=SYS_PASSWORD
 
-          # dgmgrl sẽ block khi observer đang chạy (đây là expected behavior)
-          nohup ${DGMGRL} sys/{{ sys_password }}@${CONNECT_STR} @/tmp/observer_cmd.dgmgrl \
-            >> ${LOG_DIR}/observer.log 2>&1 &
+          while true; do
+            # Detect PRIMARY
+            CONNECT_STR=""
+            for TNS_ALIAS in ORCL ORCL_STBY; do
+              ROLE=$(printf 'SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF\nSELECT DATABASE_ROLE FROM V$DATABASE;\nEXIT;\n' | \
+                ${SQLPLUS} -s sys/${SYS_PASS}@${TNS_ALIAS} as sysdba 2>/dev/null)
+              if echo "$ROLE" | grep -q 'PRIMARY'; then
+                CONNECT_STR="${TNS_ALIAS}"
+                break
+              fi
+            done
 
+            if [ -z "$CONNECT_STR" ]; then
+              echo "$(date): Cannot find PRIMARY, retry in 30s..." >> ${LOG_DIR}/observer.log
+              sleep 30
+              continue
+            fi
+
+            echo "$(date): Connecting observer to PRIMARY=${CONNECT_STR}" >> ${LOG_DIR}/observer.log
+
+            printf 'START OBSERVER OBSERVER_NAME FILE IS '"'"'LOG_DIR_PATH/fsfo.dat'"'"' LOGFILE IS '"'"'LOG_DIR_PATH/observer_dgmgrl.log'"'"';\n' | \
+              ${DGMGRL} sys/${SYS_PASS}@${CONNECT_STR} >> ${LOG_DIR}/observer.log 2>&1
+
+            echo "$(date): Observer exited (rc=$?), restarting in 15s..." >> ${LOG_DIR}/observer.log
+            sleep 15
+          done
+          RUNEOF
+
+          # Substitute placeholders
+          sed -i "s|DGMGRL_BIN|{{ dgmgrl_bin.stdout }}|g" ${LOG_DIR}/run_observer.sh
+          sed -i "s|TNS_ADMIN_DIR|{{ tns_dir.stdout }}|g" ${LOG_DIR}/run_observer.sh
+          sed -i "s|LOG_DIR_PATH|{{ observer_log_dir }}|g" ${LOG_DIR}/run_observer.sh
+          sed -i "s|SYS_PASSWORD|{{ sys_password }}|g" ${LOG_DIR}/run_observer.sh
+          sed -i "s|OBSERVER_NAME|{{ observer_name }}|g" ${LOG_DIR}/run_observer.sh
+          chmod 755 ${LOG_DIR}/run_observer.sh
+
+          # Chạy loop trong background
+          nohup ${LOG_DIR}/run_observer.sh >> ${LOG_DIR}/observer.log 2>&1 &
           OBSERVER_PID=$!
           echo $OBSERVER_PID > ${LOG_DIR}/observer.pid
-          echo "$(date): Observer PID=${OBSERVER_PID} connecting via ${CONNECT_STR}" >> ${LOG_DIR}/observer.log
-          echo "Observer started PID: ${OBSERVER_PID} via ${CONNECT_STR}"
+          echo "$(date): Observer loop PID=${OBSERVER_PID}" >> ${LOG_DIR}/observer.log
+          echo "Observer loop started PID: ${OBSERVER_PID} via ${CONNECT_STR}"
 
     - name: "OBSERVER: Start observer via script"
       become_user: ubuntu
