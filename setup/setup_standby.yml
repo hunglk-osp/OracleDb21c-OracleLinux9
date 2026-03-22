@@ -318,13 +318,12 @@
         EOF
       tags: [broker]
 
-    - name: "STEP4: Start MRP (Managed Recovery Process)"
+    - name: "STEP4: Open Standby READ ONLY"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
         sqlplus -s / as sysdba << 'EOF'
-        ALTER DATABASE RECOVER MANAGED STANDBY DATABASE
-          USING CURRENT LOGFILE DISCONNECT FROM SESSION;
+        ALTER DATABASE OPEN READ ONLY;
         EOF
       failed_when: false
       tags: [broker]
@@ -337,6 +336,17 @@
         sqlplus -s / as sysdba << 'EOF'
         ALTER PLUGGABLE DATABASE ALL OPEN READ ONLY;
         ALTER PLUGGABLE DATABASE ALL SAVE STATE;
+        EOF
+      failed_when: false
+      tags: [broker]
+
+    - name: "STEP4: Start MRP (Managed Recovery Process)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        ALTER DATABASE RECOVER MANAGED STANDBY DATABASE
+          USING CURRENT LOGFILE DISCONNECT FROM SESSION;
         EOF
       failed_when: false
       tags: [broker]
