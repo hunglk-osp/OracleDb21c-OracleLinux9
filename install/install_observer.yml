@@ -325,19 +325,30 @@
       copy:
         dest: "{{ tns_dir.stdout }}/tnsnames.ora"
         content: |
+          # ORCL — trỏ cố định vào 195 (DB_UNIQUE_NAME = ORCL)
           ORCL =
             (DESCRIPTION =
-              (ADDRESS_LIST =
-                (ADDRESS = (PROTOCOL = TCP)(HOST = {{ primary_ip }})(PORT = {{ listener_port }}))
-              )
-              (CONNECT_DATA = (SID = ORCL)))
+              (ADDRESS = (PROTOCOL = TCP)(HOST = {{ primary_ip }})(PORT = {{ listener_port }}))
+              (CONNECT_DATA =
+                (SERVICE_NAME = ORCL_DGMGRL)
+                (INSTANCE_NAME = ORCL)))
 
+          # ORCL_STBY — trỏ cố định vào 196 (DB_UNIQUE_NAME = ORCL_STBY)
           ORCL_STBY =
             (DESCRIPTION =
+              (ADDRESS = (PROTOCOL = TCP)(HOST = {{ standby_ip }})(PORT = {{ listener_port }}))
+              (CONNECT_DATA =
+                (SERVICE_NAME = ORCL_DGMGRL)
+                (INSTANCE_NAME = ORCL)))
+
+          # ORCL_PDB — service PDB (luôn trỏ Primary hiện tại qua failover)
+          ORCL_PDB =
+            (DESCRIPTION =
+              (FAILOVER = ON)
               (ADDRESS_LIST =
-                (ADDRESS = (PROTOCOL = TCP)(HOST = {{ standby_ip }})(PORT = {{ listener_port }}))
-              )
-              (CONNECT_DATA = (SID = ORCL)))
+                (ADDRESS = (PROTOCOL = TCP)(HOST = {{ primary_ip }})(PORT = {{ listener_port }}))
+                (ADDRESS = (PROTOCOL = TCP)(HOST = {{ standby_ip }})(PORT = {{ listener_port }})))
+              (CONNECT_DATA = (SERVICE_NAME = orclpdb1)))
         mode: '0644'
 
     - name: "SETUP: Configure sqlnet.ora (short connect timeout)"
@@ -417,13 +428,16 @@
           DGMGRL="{{ dgmgrl_bin.stdout }}"
           SQLPLUS="$(dirname {{ dgmgrl_bin.stdout }})/sqlplus"
 
-          # Detect PRIMARY hiện tại
+          # Detect PRIMARY hiện tại — thử ORCL (195) trước, rồi ORCL_STBY (196)
           CONNECT_STR=""
           for TNS_ALIAS in ORCL ORCL_STBY; do
-            ROLE=$(printf 'SELECT DATABASE_ROLE||chr(9)||OPEN_MODE FROM V$DATABASE;\nEXIT\n' | \
-              ${SQLPLUS} -s sys/{{ sys_password }}@${TNS_ALIAS} as sysdba 2>/dev/null | \
-              grep 'PRIMARY' | grep 'READ WRITE')
-            if [ -n "$ROLE" ]; then
+            ROLE=$(${SQLPLUS} -s sys/{{ sys_password }}@${TNS_ALIAS} as sysdba 2>/dev/null << 'SQLEOF'
+SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+SELECT TRIM(DATABASE_ROLE)||'|'||TRIM(OPEN_MODE) FROM V$DATABASE;
+EXIT;
+SQLEOF
+            )
+            if echo "$ROLE" | grep -q 'PRIMARY|READ WRITE'; then
               CONNECT_STR="${TNS_ALIAS}"
               break
             fi

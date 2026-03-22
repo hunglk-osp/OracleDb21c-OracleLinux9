@@ -189,8 +189,36 @@
         seconds: 20
       when: reinstate_result is changed
 
-    # ── 2f. Open database READ ONLY (Standby đang MOUNTED) ──
-    - name: "FIX: Open database READ ONLY"
+    # ── 2f. Re-check final role sau reinstate (để biết là Standby hay Primary) ──
+    - name: "RECHECK: Final role sau reinstate"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF LINESIZE 200
+        SELECT TRIM(DATABASE_ROLE)||'|'||TRIM(OPEN_MODE) FROM V$DATABASE;
+        EXIT;
+        EOF
+      register: final_role_check
+      changed_when: false
+      failed_when: false
+
+    - name: "RECHECK: Set final role facts"
+      set_fact:
+        final_is_standby: "{{ 'PHYSICAL STANDBY' in (final_role_check.stdout | default('')) }}"
+        final_is_primary: "{{ 'PRIMARY' in (final_role_check.stdout | default('')) and 'READ WRITE' in (final_role_check.stdout | default('')) }}"
+        final_needs_open: >-
+          {{
+            (final_role_check.stdout | default('')) is search('MOUNTED') and
+            (final_role_check.stdout | default('')) is not search('READ')
+          }}
+
+    - name: "RECHECK: Show final role"
+      debug:
+        msg: "{{ inventory_hostname }}: {{ final_role_check.stdout | default('unknown') | trim }} | standby={{ final_is_standby }} primary={{ final_is_primary }} needs_open={{ final_needs_open }}"
+
+    # ── 2g. Open database READ ONLY (chỉ khi là Standby đang MOUNTED) ──
+    - name: "FIX: Open database READ ONLY (Standby MOUNTED)"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
@@ -198,10 +226,12 @@
         ALTER DATABASE OPEN READ ONLY;
         EXIT;
         EOF
-      when: is_down | bool or is_mounted_only | bool or (now_mounted | default(false) | bool)
+      when:
+        - final_is_standby | bool
+        - final_needs_open | bool
       failed_when: false
 
-    # ── 2g. Open PDB ──
+    # ── 2h. Open PDB (chỉ khi là Standby) ──
     - name: "FIX: Open PDB read only"
       become_user: oracle
       shell: |
@@ -210,10 +240,10 @@
         ALTER PLUGGABLE DATABASE ALL OPEN READ ONLY;
         EXIT;
         EOF
-      when: is_down | bool or is_mounted_only | bool or (now_standby | default(false) | bool)
+      when: final_is_standby | bool
       failed_when: false
 
-    # ── 2h. Start MRP ──
+    # ── 2i. Start MRP (chỉ khi là Standby) ──
     - name: "FIX: Start Managed Recovery Process"
       become_user: oracle
       shell: |
@@ -222,10 +252,10 @@
         ALTER DATABASE RECOVER MANAGED STANDBY DATABASE USING CURRENT LOGFILE DISCONNECT FROM SESSION;
         EXIT;
         EOF
-      when: is_down | bool or is_mounted_only | bool or (now_standby | default(false) | bool)
+      when: final_is_standby | bool
       failed_when: false
 
-    # ── 2i. Reload listener ──
+    # ── 2j. Reload listener ──
     - name: "FIX: Reload listener (đăng ký service mới)"
       become_user: oracle
       shell: |
