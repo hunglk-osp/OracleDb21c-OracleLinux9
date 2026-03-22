@@ -468,6 +468,34 @@
         msg: "{{ dg_status.stdout_lines }}"
       tags: [broker, validate]
 
+    - name: "STEP6: Create app user osp in PDB"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        ALTER SESSION SET CONTAINER=ORCLPDB1;
+        DECLARE
+          v_count NUMBER;
+        BEGIN
+          SELECT COUNT(*) INTO v_count FROM dba_users WHERE username = 'OSP';
+          IF v_count = 0 THEN
+            EXECUTE IMMEDIATE 'CREATE USER osp IDENTIFIED BY "Osp@123"';
+            EXECUTE IMMEDIATE 'GRANT CONNECT, RESOURCE, UNLIMITED TABLESPACE TO osp';
+          END IF;
+        END;
+        /
+        SELECT username, account_status FROM dba_users WHERE username='OSP';
+        EXIT;
+        EOF
+      register: create_user
+      changed_when: "'User created' in create_user.stdout"
+      tags: [always]
+
+    - name: "STEP6: Show user creation result"
+      debug:
+        msg: "{{ create_user.stdout_lines }}"
+      tags: [always]
+
     - name: "Summary"
       debug:
         msg:
