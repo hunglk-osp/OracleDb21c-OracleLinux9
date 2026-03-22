@@ -72,9 +72,9 @@
       tags: [network]
 
     # [FIX-1] listener.ora STANDBY:
-    # GLOBAL_DBNAME phải là ORCL_STBY và ORCL_STBY_DGMGRL (không phải ORCL/ORCL_DGMGRL)
-    # Đây là lý do StaticConnectIdentifier trong Broker bị trỏ về IP Primary
-    # Broker tự build StaticConnectIdentifier dựa trên hostname + service name từ listener
+    # Cần có cả ORCL_STBY/ORCL_STBY_DGMGRL (tên riêng standby) VÀ ORCL/ORCL_DGMGRL (tên primary)
+    # ORCL_STBY* để Broker build StaticConnectIdentifier đúng cho standby
+    # ORCL/ORCL_DGMGRL để Observer ping được Standby khi Primary down (FSFO requirement)
     - name: "STEP2: Configure listener.ora (STANDBY)"
       copy:
         dest: "{{ oracle_home }}/network/admin/listener.ora"
@@ -97,6 +97,16 @@
               )
               (SID_DESC =
                 (GLOBAL_DBNAME = {{ standby_unique_name }}_DGMGRL)
+                (ORACLE_HOME = {{ oracle_home }})
+                (SID_NAME = {{ oracle_sid }})
+              )
+              (SID_DESC =
+                (GLOBAL_DBNAME = {{ oracle_sid }})
+                (ORACLE_HOME = {{ oracle_home }})
+                (SID_NAME = {{ oracle_sid }})
+              )
+              (SID_DESC =
+                (GLOBAL_DBNAME = {{ oracle_sid }}_DGMGRL)
                 (ORACLE_HOME = {{ oracle_home }})
                 (SID_NAME = {{ oracle_sid }})
               )
