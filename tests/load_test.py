@@ -162,49 +162,33 @@ def worker(stop_event, start_time):
 
 def count_records(host):
     """
-    Đếm records trên host — thử theo thứ tự:
-    1. Connect bằng user osp qua orclpdb1 (chỉ Primary có thể DML, nhưng cả Standby cũng có thể đọc)
-    2. Connect bằng sys qua orclpdb1 (Standby READ ONLY)
-    3. Fallback: connect bằng sys qua CDB (SID=ORCL) rồi switch container
+    Đếm records + lấy DB role thực tế trên host.
+    Trả về (count, role) trong đó role = 'PRIMARY' hoặc 'PHYSICAL STANDBY'
     """
-    # Thử 1: user thường qua PDB service
-    try:
-        conn = oracledb.connect(user=USER, password=PASSWORD, dsn=make_dsn(host))
-        cur  = conn.cursor()
-        cur.execute(f"SELECT COUNT(*) FROM {TABLE}")
-        count = cur.fetchone()[0]
-        cur.close()
-        conn.close()
-        return count, "user"
-    except Exception:
-        pass
-
-    # Thử 2: sys qua PDB service (Standby READ ONLY)
-    try:
-        dsn  = oracledb.makedsn(host, PORT, service_name=SERVICE)
-        conn = oracledb.connect(user="sys", password=SYS_PASS, dsn=dsn, mode=oracledb.AUTH_MODE_SYSDBA)
-        cur  = conn.cursor()
-        cur.execute(f"SELECT COUNT(*) FROM {USER}.{TABLE}")
-        count = cur.fetchone()[0]
-        cur.close()
-        conn.close()
-        return count, "sys/pdb"
-    except Exception:
-        pass
-
-    # Thử 3: sys qua CDB SID rồi switch container
-    try:
-        dsn  = oracledb.makedsn(host, PORT, sid="ORCL")
-        conn = oracledb.connect(user="sys", password=SYS_PASS, dsn=dsn, mode=oracledb.AUTH_MODE_SYSDBA)
-        cur  = conn.cursor()
-        cur.execute("ALTER SESSION SET CONTAINER = ORCLPDB1")
-        cur.execute(f"SELECT COUNT(*) FROM {USER}.{TABLE}")
-        count = cur.fetchone()[0]
-        cur.close()
-        conn.close()
-        return count, "sys/cdb"
-    except Exception as e:
-        return None, f"ERROR: {e}"
+    for try_user, try_pass, try_dsn, try_mode, switch_container in [
+        (USER,  PASSWORD, make_dsn(host), None, False),
+        ("sys", SYS_PASS, oracledb.makedsn(host, PORT, service_name=SERVICE), oracledb.AUTH_MODE_SYSDBA, False),
+        ("sys", SYS_PASS, oracledb.makedsn(host, PORT, sid="ORCL"),           oracledb.AUTH_MODE_SYSDBA, True),
+    ]:
+        try:
+            kwargs = dict(user=try_user, password=try_pass, dsn=try_dsn)
+            if try_mode:
+                kwargs["mode"] = try_mode
+            conn = oracledb.connect(**kwargs)
+            cur  = conn.cursor()
+            if switch_container:
+                cur.execute("ALTER SESSION SET CONTAINER = ORCLPDB1")
+            cur.execute("SELECT SYS_CONTEXT('USERENV','DATABASE_ROLE') FROM DUAL")
+            role = cur.fetchone()[0]
+            table_owner = f"{USER}." if try_user != USER else ""
+            cur.execute(f"SELECT COUNT(*) FROM {table_owner}{TABLE}")
+            count = cur.fetchone()[0]
+            cur.close()
+            conn.close()
+            return count, role
+        except Exception:
+            pass
+    return None, "UNREACHABLE"
 
 
 def make_live_panel(elapsed, start_time):
@@ -340,14 +324,16 @@ sync.add_column("Rows",    style="green",      width=10)
 sync.add_column("Status",  width=28)
 
 for host in HOSTS:
-    count, method = count_records(host)
-    if count is not None and not isinstance(count, str):
-        if method == "user":
-            sync.add_row(host, method, f"{count:,}", "[green]PRIMARY (RW)[/green]")
+    count, role = count_records(host)
+    if count is not None:
+        if role == "PRIMARY":
+            sync.add_row(host, role, f"{count:,}", "[green]PRIMARY (RW)[/green]")
+        elif "STANDBY" in role:
+            sync.add_row(host, role, f"{count:,}", "[cyan]STANDBY (RO)[/cyan]")
         else:
-            sync.add_row(host, method, f"{count:,}", "[cyan]STANDBY (RO)[/cyan]")
+            sync.add_row(host, role, f"{count:,}", f"[yellow]{role}[/yellow]")
     else:
-        sync.add_row(host, "-", "[red]N/A[/red]", f"[red]{method}[/red]")
+        sync.add_row(host, "-", "[red]N/A[/red]", f"[red]{role}[/red]")
 
 console.print(Panel(sync, title="[bold cyan]ROW COUNT — ALL HOSTS[/bold cyan]", border_style="cyan"))
 console.print()
