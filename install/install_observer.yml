@@ -15,57 +15,51 @@
 # Chạy từ máy 18:
 #   ansible-playbook -i inventory.ini install_observer.yml
 #
-# Test failover:
-#   1. uv run load_test.py     (trên máy 18)
-#   2. systemctl stop oracle-db (trên 195)
-#   3. Chờ 30s → 196 tự lên PRIMARY
+# Lưu ý: Playbook này hoạt động bất kể 195 hay 196 đang là Primary
+#   (sau failover, Primary có thể đổi sang 196)
 ---
 
 # =====================================================
-# PLAY 1: Enable FSFO trên Primary (chạy trên 195)
+# PLAY 1: Detect Primary + Enable FSFO
+# Chạy trên cả 2 máy, detect ai là Primary thật
 # =====================================================
-- name: "PLAY 1: Enable FSFO trên Primary"
-  hosts: primary
+- name: "PLAY 1: Enable FSFO (detect Primary động)"
+  hosts: primary,standby
   become: yes
   vars:
     oracle_home: /u01/app/oracle/product/21c/dbhome_1
     oracle_sid: ORCL
-    oracle_unique_name: ORCL
-    standby_unique_name: ORCL_STBY
-    primary_ip: 192.168.1.195
-    standby_ip: 192.168.1.196
     sys_password: "Oracle_4U"
     fsfo_threshold: 30
     fsfo_lag_limit: 30
 
   tasks:
 
-    # ── Check Broker ──
-    - name: "CHECK: Show Broker Configuration"
+    # ── Detect ai là PRIMARY thật ──
+    - name: "DETECT: Check DATABASE_ROLE trên từng host"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'EOF'
-        SHOW CONFIGURATION;
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+        SELECT TRIM(DATABASE_ROLE)||'|'||TRIM(OPEN_MODE)||'|'||TRIM(DB_UNIQUE_NAME) FROM V$DATABASE;
+        EXIT;
         EOF
-      register: broker_status
-      failed_when: false
+      register: db_info
       changed_when: false
+      failed_when: false
 
-    - name: "CHECK: Display Broker status"
+    - name: "DETECT: Show DB info"
       debug:
-        msg: "{{ broker_status.stdout_lines }}"
+        msg: "{{ inventory_hostname }}: {{ db_info.stdout | trim }}"
 
-    - name: "CHECK: Assert Broker is accessible"
-      assert:
-        that: broker_status.rc == 0
-        fail_msg: |
-          Broker không accessible! Kiểm tra:
-          1. DG_BROKER_START=TRUE trên cả Primary và Standby
-          2. Chạy: setup_primary.yml --tags broker
+    - name: "DETECT: Set is_primary fact"
+      set_fact:
+        is_primary: "{{ 'PRIMARY' in db_info.stdout and 'READ WRITE' in db_info.stdout }}"
+        db_unique_name: "{{ db_info.stdout.split('|')[2] | default('UNKNOWN') | trim }}"
 
-    # ── Flashback trên Primary ──
-    - name: "FLASH: Check Flashback trên Primary"
+    # ── Flashback ──
+    - name: "FLASH: Check Flashback"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
@@ -74,7 +68,7 @@
         SELECT FLASHBACK_ON FROM V$DATABASE;
         EXIT;
         EOF
-      register: flash_primary
+      register: flash_status
       changed_when: false
 
     - name: "FLASH: Enable Flashback trên Primary"
@@ -85,21 +79,9 @@
         ALTER DATABASE FLASHBACK ON;
         EXIT;
         EOF
-      when: "'YES' not in flash_primary.stdout"
-
-    # ── Flashback trên Standby ──
-    - name: "FLASH: Check Flashback trên Standby"
-      become_user: oracle
-      shell: |
-        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        sqlplus -s / as sysdba << 'EOF'
-        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
-        SELECT FLASHBACK_ON FROM V$DATABASE;
-        EXIT;
-        EOF
-      register: flash_standby
-      changed_when: false
-      delegate_to: standbydb
+      when:
+        - is_primary | bool
+        - "'YES' not in flash_status.stdout"
 
     - name: "FLASH: Enable Flashback trên Standby"
       become_user: oracle
@@ -111,74 +93,75 @@
         ALTER DATABASE RECOVER MANAGED STANDBY DATABASE USING CURRENT LOGFILE DISCONNECT FROM SESSION;
         EXIT;
         EOF
-      when: "'YES' not in flash_standby.stdout"
+      when:
+        - not (is_primary | bool)
+        - "'YES' not in flash_status.stdout"
       failed_when: false
-      delegate_to: standbydb
 
-    # ── FSFO Properties ──
-    - name: "FSFO: Set FastStartFailoverThreshold = {{ fsfo_threshold }}s"
+    # ── FSFO Properties (chỉ chạy trên Primary) ──
+    - name: "FSFO: Configure properties"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'EOF'
+        dgmgrl sys/{{ sys_password }}@{{ db_unique_name }} << 'DGEOF'
         EDIT CONFIGURATION SET PROPERTY FastStartFailoverThreshold = {{ fsfo_threshold }};
-        EOF
-
-    - name: "FSFO: Set FastStartFailoverLagLimit = {{ fsfo_lag_limit }}"
-      become_user: oracle
-      shell: |
-        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'EOF'
         EDIT CONFIGURATION SET PROPERTY FastStartFailoverLagLimit = {{ fsfo_lag_limit }};
-        EOF
-
-    - name: "FSFO: Set FastStartFailoverAutoReinstate = TRUE"
-      become_user: oracle
-      shell: |
-        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'EOF'
         EDIT CONFIGURATION SET PROPERTY FastStartFailoverAutoReinstate = TRUE;
-        EOF
-
-    - name: "FSFO: Set FastStartFailoverPmyShutdown = FALSE (trigger failover kể cả khi shutdown clean)"
-      become_user: oracle
-      shell: |
-        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'EOF'
         EDIT CONFIGURATION SET PROPERTY FastStartFailoverPmyShutdown = FALSE;
-        EOF
-
-    - name: "FSFO: Set CommunicationTimeout = 15 (giảm từ 180 mặc định)"
-      become_user: oracle
-      shell: |
-        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'EOF'
         EDIT CONFIGURATION SET PROPERTY CommunicationTimeout = 15;
-        EOF
+        DGEOF
+      when: is_primary | bool
+      register: fsfo_props
+
+    - name: "FSFO: Show properties result"
+      debug:
+        msg: "{{ fsfo_props.stdout_lines }}"
+      when: is_primary | bool
 
     # ── Enable FSFO ──
     - name: "FSFO: Enable FastStartFailover"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'EOF'
+        dgmgrl sys/{{ sys_password }}@{{ db_unique_name }} << 'DGEOF'
         ENABLE FAST_START FAILOVER;
-        EOF
+        DGEOF
+      when: is_primary | bool
       register: fsfo_enable
       failed_when: false
 
     - name: "FSFO: Show enable result"
       debug:
         msg: "{{ fsfo_enable.stdout_lines }}"
+      when: is_primary | bool
 
-    # ── Stop observer cũ (nếu có) ──
+    # ── Stop observer cũ (chạy trên Primary) ──
     - name: "OBSERVER: Stop observer cũ trong broker"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        printf "STOP OBSERVER ALL\nEXIT\n" | \
-          dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} 2>&1 || true
+        printf "STOP OBSERVER ALL;\nEXIT;\n" | \
+          dgmgrl sys/{{ sys_password }}@{{ db_unique_name }} 2>&1 || true
+      when: is_primary | bool
       failed_when: false
+
+    # ── Show config ──
+    - name: "CHECK: Show Broker Configuration"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        dgmgrl sys/{{ sys_password }}@{{ db_unique_name }} << 'DGEOF'
+        SHOW CONFIGURATION;
+        DGEOF
+      when: is_primary | bool
+      register: broker_status
+      failed_when: false
+      changed_when: false
+
+    - name: "CHECK: Display Broker status"
+      debug:
+        msg: "{{ broker_status.stdout_lines }}"
+      when: is_primary | bool
 
 # =====================================================
 # PLAY 2: Cài Oracle Client + Start Observer trên máy 18
@@ -210,6 +193,7 @@
         name:
           - alien
           - wget
+          - sshpass
         state: present
         update_cache: yes
 
@@ -231,9 +215,12 @@
 
     - name: "INSTALL: Check if dgmgrl already exists"
       shell: |
-        FOUND=$(find /usr/lib/oracle /opt/oracle -name dgmgrl 2>/dev/null | head -1)
-        [ -z "$FOUND" ] && FOUND=$(which dgmgrl 2>/dev/null)
-        [ -z "$FOUND" ] && echo "NOT_FOUND" || echo "$FOUND"
+        if [ -f /usr/lib/oracle/21/client64/bin/dgmgrl ]; then
+          echo "/usr/lib/oracle/21/client64/bin/dgmgrl"
+        else
+          FOUND=$(which dgmgrl 2>/dev/null)
+          echo "${FOUND:-NOT_FOUND}"
+        fi
       register: dgmgrl_existing
       changed_when: false
 
@@ -289,17 +276,12 @@
         ldconfig
       when: dgmgrl_existing.stdout == "NOT_FOUND"
 
-    # dgmgrl không có trong Instant Client — copy từ Primary
-    - name: "INSTALL: Install sshpass (for scp from Primary)"
-      apt:
-        name: sshpass
-        state: present
-
+    # Copy dgmgrl từ Primary nếu chưa có
     - name: "INSTALL: Copy dgmgrl binary from Primary"
       shell: |
         if [ ! -f /usr/lib/oracle/21/client64/bin/dgmgrl ]; then
           sshpass -p 'Osp@123' scp -o StrictHostKeyChecking=no \
-            root@{{ primary_ip }}:/u01/app/oracle/product/21c/dbhome_1/bin/dgmgrl \
+            root@{{ primary_ip }}:{{ oracle_home_primary }}/bin/dgmgrl \
             /usr/lib/oracle/21/client64/bin/dgmgrl
           chmod 755 /usr/lib/oracle/21/client64/bin/dgmgrl
           echo "COPIED"
@@ -310,12 +292,10 @@
     # ── Tìm dgmgrl ──
     - name: "SETUP: Locate dgmgrl"
       shell: |
-        # Check known Instant Client path first
         if [ -f /usr/lib/oracle/21/client64/bin/dgmgrl ]; then
           echo "/usr/lib/oracle/21/client64/bin/dgmgrl"
         else
-          FOUND=$(find /usr/lib/oracle /opt/oracle /usr/local -name dgmgrl -type f 2>/dev/null | head -1)
-          [ -z "$FOUND" ] && FOUND=$(which dgmgrl 2>/dev/null)
+          FOUND=$(which dgmgrl 2>/dev/null)
           echo "${FOUND:-NOT_FOUND}"
         fi
       register: dgmgrl_bin
@@ -324,11 +304,7 @@
     - name: "SETUP: Assert dgmgrl found"
       assert:
         that: dgmgrl_bin.stdout != "NOT_FOUND"
-        fail_msg: "dgmgrl không tìm thấy! Copy từ Primary thất bại."
-
-    - name: "SETUP: Show dgmgrl path"
-      debug:
-        msg: "dgmgrl: {{ dgmgrl_bin.stdout }}"
+        fail_msg: "dgmgrl không tìm thấy!"
 
     # ── tnsnames.ora ──
     - name: "SETUP: Detect TNS_ADMIN dir"
@@ -368,7 +344,6 @@
       copy:
         dest: "{{ tns_dir.stdout }}/sqlnet.ora"
         content: |
-          # Timeout ngắn để observer detect Primary down nhanh
           SQLNET.OUTBOUND_CONNECT_TIMEOUT = 5
           SQLNET.RECV_TIMEOUT = 3
           SQLNET.SEND_TIMEOUT = 3
@@ -380,7 +355,6 @@
       copy:
         dest: /etc/profile.d/oracle-observer.sh
         content: |
-          # Oracle Observer environment
           ORACLE_CLIENT=$(dirname $(dirname {{ dgmgrl_bin.stdout }}))
           export ORACLE_HOME=$ORACLE_CLIENT
           export TNS_ADMIN={{ tns_dir.stdout }}
@@ -388,18 +362,32 @@
           export LD_LIBRARY_PATH=$ORACLE_CLIENT/lib:${LD_LIBRARY_PATH:-}
         mode: '0644'
 
-    # ── Kill observer cũ ──
-    - name: "OBSERVER: Kill observer process cũ"
-      shell: pkill -9 -f "dgmgrl" || true
+    # ── Kill observer cũ (killall hoạt động trên Ubuntu) ──
+    - name: "OBSERVER: Kill ALL observer processes cũ"
+      shell: |
+        killall -9 dgmgrl 2>/dev/null || true
+        killall -9 start_observer.sh 2>/dev/null || true
+        # Kill mọi sleep 86400 zombie
+        for pid in $(ps -eo pid,args | grep 'sleep 86400' | grep -v grep | awk '{print $1}'); do
+          kill -9 $pid 2>/dev/null || true
+        done
+        sleep 1
+        # Verify clean
+        REMAINING=$(ps -ef | grep -E 'dgmgrl|start_observer|sleep 86400' | grep -v grep | wc -l)
+        echo "Remaining processes: $REMAINING"
       failed_when: false
 
     - name: "OBSERVER: Cleanup old observer files"
-      shell: rm -f /home/ubuntu/fsfo.dat /home/ubuntu/observer_localhost.log {{ observer_log_dir }}/observer.log 2>/dev/null || true
+      shell: |
+        rm -f /home/ubuntu/fsfo.dat 2>/dev/null
+        rm -f /home/ubuntu/observer_localhost.log 2>/dev/null
+        rm -f {{ observer_log_dir }}/observer.log 2>/dev/null
+        rm -f {{ observer_log_dir }}/observer.pid 2>/dev/null
       failed_when: false
 
-    - name: "OBSERVER: Wait"
+    - name: "OBSERVER: Wait after cleanup"
       pause:
-        seconds: 3
+        seconds: 5
 
     # ── Start Observer ──
     - name: "OBSERVER: Create log directory"
@@ -418,38 +406,63 @@
         mode: '0755'
         content: |
           #!/bin/bash
+          # Observer startup script — auto-detect PRIMARY
           ORACLE_CLIENT=$(dirname $(dirname {{ dgmgrl_bin.stdout }}))
           export ORACLE_HOME=$ORACLE_CLIENT
           export TNS_ADMIN={{ tns_dir.stdout }}
           export PATH=$ORACLE_CLIENT/bin:$PATH
           export LD_LIBRARY_PATH=$ORACLE_CLIENT/lib:${LD_LIBRARY_PATH:-}
 
-          # Kill cũ nếu có
-          pkill -f "dgmgrl.*observer" 2>/dev/null || true
-          sleep 2
+          LOG_DIR="{{ observer_log_dir }}"
+          DGMGRL="{{ dgmgrl_bin.stdout }}"
+          SQLPLUS="$(dirname {{ dgmgrl_bin.stdout }})/sqlplus"
 
-          # Start observer — dgmgrl cần stdin mở để giữ session
-          (echo "START OBSERVER {{ observer_name }}"; while true; do sleep 86400; done) | \
-            nohup {{ dgmgrl_bin.stdout }} -silent sys/{{ sys_password }}@ORCL \
-            >> {{ observer_log_dir }}/observer.log 2>&1 &
-          echo $! > {{ observer_log_dir }}/observer.pid
-          echo "Observer started PID: $(cat {{ observer_log_dir }}/observer.pid)"
+          # Detect PRIMARY hiện tại
+          CONNECT_STR=""
+          for TNS_ALIAS in ORCL ORCL_STBY; do
+            ROLE=$(printf 'SELECT DATABASE_ROLE||chr(9)||OPEN_MODE FROM V$DATABASE;\nEXIT\n' | \
+              ${SQLPLUS} -s sys/{{ sys_password }}@${TNS_ALIAS} as sysdba 2>/dev/null | \
+              grep 'PRIMARY' | grep 'READ WRITE')
+            if [ -n "$ROLE" ]; then
+              CONNECT_STR="${TNS_ALIAS}"
+              break
+            fi
+          done
+
+          if [ -z "$CONNECT_STR" ]; then
+            echo "$(date): ERROR — Cannot find PRIMARY database!" >> ${LOG_DIR}/observer.log
+            exit 1
+          fi
+
+          echo "$(date): Starting observer, PRIMARY = ${CONNECT_STR}" >> ${LOG_DIR}/observer.log
+
+          # Start observer — dùng file chứa command (tránh zombie pipe)
+          cat > /tmp/observer_cmd.dgmgrl << 'CMDEOF'
+          START OBSERVER {{ observer_name }} FILE IS '{{ observer_log_dir }}/fsfo.dat' LOGFILE IS '{{ observer_log_dir }}/observer_dgmgrl.log';
+          CMDEOF
+
+          # dgmgrl sẽ block khi observer đang chạy (đây là expected behavior)
+          nohup ${DGMGRL} sys/{{ sys_password }}@${CONNECT_STR} @/tmp/observer_cmd.dgmgrl \
+            >> ${LOG_DIR}/observer.log 2>&1 &
+
+          OBSERVER_PID=$!
+          echo $OBSERVER_PID > ${LOG_DIR}/observer.pid
+          echo "$(date): Observer PID=${OBSERVER_PID} connecting via ${CONNECT_STR}" >> ${LOG_DIR}/observer.log
+          echo "Observer started PID: ${OBSERVER_PID} via ${CONNECT_STR}"
 
     - name: "OBSERVER: Start observer via script"
       become_user: ubuntu
       shell: |
-        nohup {{ observer_log_dir }}/start_observer.sh > {{ observer_log_dir }}/start.log 2>&1 &
-        sleep 3
-        cat {{ observer_log_dir }}/start.log
+        {{ observer_log_dir }}/start_observer.sh 2>&1
       register: observer_start_result
 
     - name: "OBSERVER: Show start result"
       debug:
         msg: "{{ observer_start_result.stdout_lines }}"
 
-    - name: "OBSERVER: Wait for observer to register"
+    - name: "OBSERVER: Wait for observer to register (20s)"
       pause:
-        seconds: 15
+        seconds: 20
 
     # ── Verify ──
     - name: "VERIFY: Check observer process"
@@ -462,7 +475,12 @@
         msg: "{{ obs_proc.stdout_lines }}"
 
     - name: "VERIFY: Show observer log"
-      shell: tail -20 {{ observer_log_dir }}/observer.log 2>/dev/null || echo "(no log yet)"
+      shell: |
+        echo "=== observer.log ==="
+        tail -20 {{ observer_log_dir }}/observer.log 2>/dev/null || echo "(no log)"
+        echo ""
+        echo "=== observer_dgmgrl.log ==="
+        tail -20 {{ observer_log_dir }}/observer_dgmgrl.log 2>/dev/null || echo "(no log)"
       register: obs_log
       changed_when: false
 
@@ -471,32 +489,51 @@
         msg: "{{ obs_log.stdout_lines }}"
 
 # =====================================================
-# PLAY 3: Verify FSFO từ Primary
+# PLAY 3: Verify FSFO (detect Primary động)
 # =====================================================
 - name: "PLAY 3: Verify FSFO"
-  hosts: primary
+  hosts: primary,standby
   become: yes
   vars:
     oracle_home: /u01/app/oracle/product/21c/dbhome_1
     oracle_sid: ORCL
-    oracle_unique_name: ORCL
     sys_password: "Oracle_4U"
 
   tasks:
+    - name: "DETECT: Check DATABASE_ROLE"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+        SELECT TRIM(DATABASE_ROLE)||'|'||TRIM(OPEN_MODE)||'|'||TRIM(DB_UNIQUE_NAME) FROM V$DATABASE;
+        EXIT;
+        EOF
+      register: db_info_v
+      changed_when: false
+      failed_when: false
+
+    - name: "DETECT: Set is_primary"
+      set_fact:
+        is_primary_v: "{{ 'PRIMARY' in db_info_v.stdout and 'READ WRITE' in db_info_v.stdout }}"
+        db_unique_name_v: "{{ db_info_v.stdout.split('|')[2] | default('UNKNOWN') | trim }}"
+
     - name: "VERIFY: Show FSFO configuration"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
-        dgmgrl sys/{{ sys_password }}@{{ oracle_unique_name }} << 'EOF'
+        dgmgrl sys/{{ sys_password }}@{{ db_unique_name_v }} << 'DGEOF'
         SHOW CONFIGURATION VERBOSE;
         SHOW FAST_START FAILOVER;
-        EOF
+        DGEOF
+      when: is_primary_v | bool
       register: fsfo_final
       changed_when: false
 
     - name: "VERIFY: Display FSFO status"
       debug:
         msg: "{{ fsfo_final.stdout_lines }}"
+      when: is_primary_v | bool
 
     - name: "Summary"
       debug:
@@ -505,22 +542,14 @@
           - "FAST-START FAILOVER — HOÀN TẤT"
           - "========================================="
           - ""
-          - "Kiến trúc:"
-          - "  ┌─────────────┐    ┌─────────────┐"
-          - "  │ 195 PRIMARY │◄──►│ 196 STANDBY │"
-          - "  └──────┬──────┘    └──────┬──────┘"
-          - "         │                  │"
-          - "         └──── 18 OBSERVER ─┘"
-          - ""
-          - "Threshold : 30s"
-          - "AutoReinstate: TRUE"
+          - "Current state:"
+          - "  {{ inventory_hostname }}: {{ db_info_v.stdout | trim }}"
           - ""
           - "Test:"
           - "  1. uv run load_test.py"
-          - "  2. systemctl stop oracle-db  (trên 195)"
-          - "  3. Chờ ~30s → 196 tự lên PRIMARY"
-          - "  4. load_test.py tự failover sang 196"
+          - "  2. Tắt Primary → chờ ~30s → Standby tự lên PRIMARY"
+          - "  3. load_test.py tự failover"
           - ""
-          - "Check observer log:"
-          - "  tail -f /home/ubuntu/oracle-observer/observer.log"
+          - "Observer log: tail -f /home/ubuntu/oracle-observer/observer.log"
           - "========================================="
+      when: is_primary_v | bool

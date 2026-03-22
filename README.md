@@ -1,210 +1,207 @@
-# Oracle Database 21c + Data Guard on Oracle Linux 9
+# Oracle 21c Data Guard + FSFO — Ansible Automation
 
-## Servers
-
-| Role    | Hostname     | IP             | DB_UNIQUE_NAME |
-|---------|--------------|----------------|----------------|
-| Primary | primarydb    | 192.168.1.195  | ORCL           |
-| Standby | standbydb    | 192.168.1.196  | ORCL_STBY      |
-
----
-
-## Files
+## Kiến trúc
 
 ```
-install_oracle21c_primary.yml  - Cài Oracle software + tạo DB trên Primary
-install_oracle21c_standby.yml  - Cài Oracle software (không tạo DB) trên Standby
-setup_primary.yml              - Cấu hình DG trên Primary (archivelog, SRL, broker, copy pwdfile)
-setup_standby.yml              - RMAN duplicate + bật MRP trên Standby
-cleanup_oracle21c.yml          - Xóa toàn bộ Oracle trên 1 hoặc 2 máy
-inventory.ini                  - Ansible inventory
-ansible.cfg                    - Ansible configuration
-LINUX.X64_213000_db_home.zip   - Oracle 21c installer (phải có sẵn trên từng máy)
+┌──────────────────────┐         ┌──────────────────────┐
+│  192.168.1.195       │         │  192.168.1.196       │
+│  Oracle DB (ORCL)    │◄──────►│  Oracle DB (ORCL_STBY)│
+│  PRIMARY / STANDBY   │  Redo   │  PRIMARY / STANDBY   │
+└──────────┬───────────┘  Logs   └──────────┬───────────┘
+           │                                │
+           └──────── Observer ──────────────┘
+                 192.168.1.18
+                 (Ubuntu — máy thứ 3)
+```
+
+**Primary/Standby KHÔNG cố định.** Sau mỗi lần failover, 2 con đổi vai cho nhau.
+Tất cả playbook tự detect ai là Primary/Standby — chạy bao nhiêu lần cũng OK.
+
+| Role     | Hostname   | IP             | DB_UNIQUE_NAME |
+|----------|------------|----------------|----------------|
+| DB Node  | primarydb  | 192.168.1.195  | ORCL           |
+| DB Node  | standbydb  | 192.168.1.196  | ORCL_STBY      |
+| Observer | observerdb | 192.168.1.18   | —              |
+
+---
+
+## Cấu trúc thư mục
+
+```
+OracleDb21c-OracleLinux9/
+├── inventory.ini                          # Ansible inventory (3 máy)
+├── ansible.cfg                            # Ansible config
+├── README.md
+│
+├── install/                               # Cài đặt từ đầu
+│   ├── install_oracle21c_primary.yml      #   Cài Oracle 21c + tạo DB trên 195
+│   ├── install_oracle21c_standby.yml      #   Cài Oracle 21c (software only) trên 196
+│   └── install_observer.yml               #   Cài Instant Client + Enable FSFO + Start Observer
+│
+├── setup/                                 # Cấu hình Data Guard
+│   ├── setup_primary.yml                  #   Cấu hình DG trên Primary (archivelog, SRL, broker)
+│   └── setup_standby.yml                  #   RMAN duplicate + bật MRP trên Standby
+│
+├── operations/                            # Vận hành
+│   ├── restart_crashed_db.yml             #   Khôi phục DB sau sự cố (crash/stop/mất điện)
+│   └── cleanup_oracle21c.yml              #   Xóa toàn bộ Oracle
+│
+└── tests/                                 # Test failover + load test
+    ├── crash_primary_test.yml             #   Crash con PRIMARY (tự detect, kill -9)
+    ├── crash_standby_test.yml             #   Crash con STANDBY (tự detect, kill -9)
+    ├── load_test.py                       #   Load test insert + auto-failover
+    ├── check_sync.py                      #   Check đồng bộ giữa 2 host
+    ├── check_dg_status.py                 #   Check Data Guard status
+    └── oracle_demo.py                     #   Demo CRUD cơ bản
 ```
 
 ---
 
-## Yêu cầu
+## Cài đặt từ đầu
 
-- Oracle Linux 9 (x86_64) — Minimal Install
-- RAM tối thiểu 8GB (khuyến nghị 16GB)
-- Disk tối thiểu 40GB cho `/u01`
-- File `LINUX.X64_213000_db_home.zip` có sẵn tại `/root/OracleDb21c-OracleLinux9/` trên **từng máy**
-
----
-
-## Thứ tự chạy
-
-### Bước 1 — Cài Primary (192.168.1.195)
+Chạy từ máy 18 (observer), theo thứ tự:
 
 ```bash
-ansible-playbook -i inventory.ini install_oracle21c_primary.yml --limit primary
-```
+cd /home/ubuntu/rnd/OracleDb21c-OracleLinux9
 
-Thực hiện: cài OS packages, Oracle software, tạo CDB+PDB, listener, systemd service.
-Thời gian: ~45-60 phút.
+# 1. Cài Oracle 21c trên Primary (45-60 phút)
+ansible-playbook install/install_oracle21c_primary.yml
+
+# 2. Cài Oracle 21c trên Standby (20-30 phút)
+ansible-playbook install/install_oracle21c_standby.yml
+
+# 3. Setup Data Guard — Primary
+ansible-playbook setup/setup_primary.yml
+
+# 4. Setup Data Guard — Standby (RMAN duplicate, 20-60 phút)
+ansible-playbook setup/setup_standby.yml
+
+# 5. Finish Broker trên Primary
+ansible-playbook setup/setup_primary.yml --tags broker
+
+# 6. Enable FSFO + Start Observer
+ansible-playbook install/install_observer.yml
+```
 
 ---
 
-### Bước 2 — Cài Standby (192.168.1.196)
+## Vận hành
+
+### Khôi phục DB sau sự cố
+
+Khi DB bị crash (kill -9), stop (systemctl stop), hoặc mất điện:
 
 ```bash
-ansible-playbook -i inventory.ini install_oracle21c_standby.yml --limit standby
+ansible-playbook operations/restart_crashed_db.yml
 ```
 
-Thực hiện: cài OS packages, Oracle software (chỉ software, **không tạo DB**), listener, init.ora tối thiểu.
-Thời gian: ~20-30 phút.
+Playbook tự xử lý **mọi trường hợp**:
 
----
+| Trạng thái | Hành động |
+|---|---|
+| Instance chết hoàn toàn | Start listener → STARTUP MOUNT → đợi reinstate → OPEN READ ONLY → PDB → MRP |
+| DB MOUNTED nhưng chưa OPEN | ALTER DATABASE OPEN READ ONLY → PDB → MRP |
+| DB chưa reinstate (vẫn PRIMARY MOUNTED) | Manual REINSTATE qua broker → OPEN → PDB → MRP |
+| DB đang chạy bình thường | Skip |
 
-### Bước 3 — Setup Data Guard trên Primary
-
-```bash
-ansible-playbook -i inventory.ini setup_primary.yml --limit primary \
-  -e "standby_root_password=<PASSWORD_ROOT_MAY_196>"
-```
-
-Thực hiện:
-- Generate SSH key trên Primary + copy sang Standby (dùng `standby_root_password` 1 lần duy nhất)
-- Bật ARCHIVELOG mode + Force Logging + Flashback
-- Tạo Standby Redo Logs
-- Cấu hình tnsnames.ora + listener.ora
-- Set DG_BROKER_CONFIG_FILE trong SPFILE
-- Copy password file sang Standby qua `scp`
-
----
-
-### Bước 4 — Setup Standby (RMAN Duplicate)
-
-```bash
-ansible-playbook -i inventory.ini setup_standby.yml --limit standby
-```
-
-Thực hiện:
-- Cấu hình tnsnames.ora + listener.ora trên Standby
-- Startup NOMOUNT
-- RMAN Duplicate từ Primary (20-60 phút)
-- Set DG_BROKER_CONFIG_FILE trong SPFILE của Standby
-- Add Standby Redo Logs
-- Bật DG_BROKER_START + MRP
-
----
-
-### Bước 5 — Tạo DG Broker Configuration (trên Primary)
-
-```bash
-ansible-playbook -i inventory.ini setup_primary.yml --limit primary --tags broker
-```
-
-Thực hiện: tạo Broker config, ADD standby database, ENABLE CONFIGURATION, SHOW CONFIGURATION.
-
----
-
-## Kiểm tra sau khi hoàn tất
-
-```bash
-# Trên Primary
-su - oracle -c "dgmgrl sys/Oracle_4U@ORCL 'show configuration'"
-su - oracle -c "dgmgrl sys/Oracle_4U@ORCL 'show database verbose ORCL'"
-su - oracle -c "dgmgrl sys/Oracle_4U@ORCL 'show database verbose ORCL_STBY'"
-```
-
-Kết quả mong đợi:
-```
-Configuration - DG_ORCL
-  Protection Mode: MaxPerformance
-  Members:
-  ORCL      - Primary database
-  ORCL_STBY - Physical standby database
-
-Fast-Start Failover:  Disabled
-Configuration Status: SUCCESS
-```
-
----
-
-## Switchover
-
-```bash
-su - oracle -c "dgmgrl sys/Oracle_4U@ORCL 'validate database verbose ORCL_STBY'"
-su - oracle -c "dgmgrl sys/Oracle_4U@ORCL 'switchover to ORCL_STBY'"
-su - oracle -c "dgmgrl sys/Oracle_4U@ORCL 'show configuration'"
-```
-
----
-
-## Cleanup
+### Cleanup
 
 ```bash
 # Xóa cả 2 máy
-ansible-playbook -i inventory.ini cleanup_oracle21c.yml
+ansible-playbook operations/cleanup_oracle21c.yml
 
-# Chỉ xóa Primary
-ansible-playbook -i inventory.ini cleanup_oracle21c.yml --limit primary
-
-# Chỉ xóa Standby
-ansible-playbook -i inventory.ini cleanup_oracle21c.yml --limit standby
+# Chỉ xóa 1 máy
+ansible-playbook operations/cleanup_oracle21c.yml --limit primary
+ansible-playbook operations/cleanup_oracle21c.yml --limit standby
 ```
 
 ---
 
-## Quản lý hàng ngày
+## Test Failover — 3 Kịch bản
 
-### Start / Stop / Restart Oracle Database
+Cần **2 terminal** trên máy 18.
 
-Sử dụng `systemctl` (khuyến nghị — đã được cấu hình sẵn bởi Ansible):
+### Kịch bản 1: Load test bình thường + check đồng bộ
 
 ```bash
-# Start database + listener
-systemctl start oracle-db
-
-# Stop database + listener
-systemctl stop oracle-db
-
-# Restart
-systemctl restart oracle-db
-
-# Kiểm tra trạng thái
-systemctl status oracle-db
-
-# Xác nhận database đang chạy
-ps -ef | grep pmon
-# Phải thấy: oracle ... ora_pmon_ORCL
+# Terminal 1
+uv run tests/load_test.py
 ```
 
-Service `oracle-db` thực hiện:
-- **Start**: fix oradism SUID → start listener → `STARTUP` database → open tất cả PDB
-- **Stop**: `SHUTDOWN IMMEDIATE` database → stop listener
-- **Primary**: database mở bình thường (`STARTUP`)
-- **Standby**: database mở `MOUNT` rồi `OPEN READ ONLY`
-- **Auto-start**: database tự bật khi server khởi động lại
+Kết quả: Insert 120s, không lỗi. Cả 2 host có **cùng số row**.
 
-> **Lưu ý kỹ thuật**: Playbook tạo wrapper script `/usr/local/bin/oracle-start.sh` và `oracle-stop.sh` thay vì dùng `dbstart`/`dbshut` trực tiếp, vì Oracle 21c read-only home reset SUID bit của `oradism` khiến `dbstart` qua systemd bị lỗi `ORA-12791`.
+---
 
-### Thao tác thủ công (nếu cần)
+### Kịch bản 2: Tắt Standby giữa lúc load test
 
 ```bash
-# Login SYSDBA
-su - oracle -c "sqlplus / as sysdba"
+# Terminal 1
+uv run tests/load_test.py
 
-# Listener
-su - oracle -c "lsnrctl status"
-su - oracle -c "lsnrctl start"
-su - oracle -c "lsnrctl stop"
+# Terminal 2 (đợi ~20s)
+ansible-playbook tests/crash_standby_test.yml
 
-# Kiểm tra PDB
-su - oracle -c "sqlplus / as sysdba" << 'EOF'
-SHOW PDBS;
-EXIT;
-EOF
+# Quan sát: load test KHÔNG bị ảnh hưởng
 
-# Test connection
-su - oracle -c "sqlplus chirag/Tiger123@localhost:1521/orclpdb1"
+# Terminal 2 (bật lại)
+ansible-playbook operations/restart_crashed_db.yml
+```
+
+Kết quả: Load test không gián đoạn. Con crash restart thành Standby, data đồng bộ.
+
+---
+
+### Kịch bản 3: Tắt Primary giữa lúc load test — FSFO failover
+
+```bash
+# Terminal 1
+uv run tests/load_test.py
+
+# Terminal 2 (đợi ~20s)
+ansible-playbook tests/crash_primary_test.yml
+
+# Quan sát: load test DOWN ~30-40s → tự failover sang host còn lại
+# Hiển thị: Failover #1: 192.168.1.X → 192.168.1.Y
+
+# Sau khi load test xong — Terminal 2:
+ansible-playbook operations/restart_crashed_db.yml    # reinstate con crash
+ansible-playbook install/install_observer.yml         # re-enable FSFO + observer
 ```
 
 ---
 
-## Thông tin kết nối (mặc định)
+### Kịch bản 3b: Đổi qua đổi lại (round-trip)
+
+Chạy kịch bản 3 **hai lần liên tiếp**:
+
+```
+Lần 1: 195=Primary → crash → 196 lên PRIMARY
+Lần 2: 196=Primary → crash → 195 lên PRIMARY
+```
+
+Sau mỗi lần:
+```bash
+ansible-playbook operations/restart_crashed_db.yml
+ansible-playbook install/install_observer.yml
+```
+
+Rồi lặp lại. Tất cả playbook tự detect — không cần sửa gì.
+
+---
+
+## FSFO Properties
+
+| Property | Value | Giải thích |
+|---|---|---|
+| FastStartFailoverThreshold | 30s | Thời gian chờ trước khi trigger failover |
+| FastStartFailoverLagLimit | 30s | Suspend FSFO nếu redo lag > 30s |
+| FastStartFailoverAutoReinstate | TRUE | Tự reinstate old Primary thành Standby |
+| FastStartFailoverPmyShutdown | FALSE | Trigger failover cả khi shutdown clean |
+| CommunicationTimeout | 15s | Timeout kết nối Observer ↔ DB |
+
+---
+
+## Thông tin kết nối
 
 ```
 Port         : 1521
@@ -214,109 +211,50 @@ User         : chirag / Tiger123
 SYS Password : Oracle_4U
 ```
 
-### Kết nối DBeaver / SQL Client
-
-| | Primary | Standby |
-|---|---|---|
-| Host | 192.168.1.195 | 192.168.1.196 |
-| Port | 1521 | 1521 |
-| SID (CDB) | ORCL | ORCL |
-| Service (PDB) | orclpdb1 | orclpdb1 |
-| User thường | chirag / Tiger123 | chirag / Tiger123 (READ ONLY) |
-| SYS | sys / Oracle_4U (SYSDBA) | sys / Oracle_4U (SYSDBA) |
-
-> **Lưu ý Standby:** Connect vào CDB (`SID=ORCL`) trước, sau đó chạy `ALTER SESSION SET CONTAINER = ORCLPDB1` để xem data của `chirag`.
-
 ---
 
-## Kiến trúc CDB / PDB
-
-```
-CDB (Container Database) = ORCL
-├── CDB$ROOT        ← SYS login vào đây (SID=ORCL)
-├── PDB$SEED        ← Template tạo PDB mới
-└── ORCLPDB1        ← Database thật, chứa data ứng dụng
-      └── Schema CHIRAG
-            └── Table: employees, ...
-```
-
-- **SYS** connect vào CDB → dùng `ALTER SESSION SET CONTAINER = ORCLPDB1` để vào PDB
-- **chirag** connect thẳng vào PDB qua service `orclpdb1`
-- Standby PDB luôn ở `READ ONLY`, không thể ghi
-
----
-
-## Python Demo Scripts
+## Monitoring
 
 ```bash
-cd /home/ubuntu/rnd/OracleDb21c-OracleLinux9
+# Observer log (máy 18)
+tail -f /home/ubuntu/oracle-observer/observer_dgmgrl.log
 
-# Demo CRUD cơ bản (connect Primary, tạo table, insert/update/delete, stored procedure)
-uv run oracle_demo.py
+# Broker status (SSH vào bất kỳ con nào đang chạy)
+dgmgrl sys/Oracle_4U@ORCL 'SHOW CONFIGURATION;'
+dgmgrl sys/Oracle_4U@ORCL_STBY 'SHOW CONFIGURATION;'
 
-# Kiểm tra sync giữa Primary và Standby
-uv run check_sync.py
-```
-
-Dependencies: `oracledb` (cài bằng `uv add oracledb`)
-
----
-
-## Data Guard — Lưu ý quan trọng
-
-### Listener trên Standby
-Standby **không tự động** có service `orclpdb1` sau khi setup. Nếu cần connect trực tiếp vào PDB của Standby, chạy lại tag network:
-
-```bash
-ansible-playbook setup_standby.yml --tags network
-ansible-playbook setup_standby.yml --tags broker
-```
-
-Hoặc thủ công trên Standby:
-```bash
-su - oracle
-sqlplus / as sysdba
-```
-```sql
-ALTER PLUGGABLE DATABASE orclpdb1 OPEN READ ONLY;
-ALTER PLUGGABLE DATABASE orclpdb1 SAVE STATE;
-EXIT;
-```
-```bash
-lsnrctl reload
-```
-
-### Kiểm tra sync từ Primary
-```sql
--- Xem archive log đang ship sang Standby
-SELECT DEST_ID, STATUS, TARGET, DESTINATION, ERROR
-FROM V$ARCHIVE_DEST
-WHERE TARGET = 'STANDBY' AND STATUS != 'INACTIVE';
-
--- Sequence đang ở đâu
-SELECT THREAD#, MAX(SEQUENCE#) FROM V$LOG GROUP BY THREAD#;
+# Alert log
+tail -f /u01/app/oracle/diag/rdbms/orcl/ORCL/trace/alert_ORCL.log
+tail -f /u01/app/oracle/diag/rdbms/orcl_stby/ORCL/trace/alert_ORCL.log
 ```
 
 ---
 
 ## Troubleshooting
 
+**Observer không start / ORA-16814:**
 ```bash
-# Ansible log
-tail -f ./ansible.log
+ssh ubuntu@192.168.1.18 "sudo killall -9 dgmgrl start_observer.sh sleep"
+dgmgrl sys/Oracle_4U@ORCL 'STOP OBSERVER ALL;'
+dgmgrl sys/Oracle_4U@ORCL_STBY 'STOP OBSERVER ALL;'
+ansible-playbook install/install_observer.yml
+```
 
-# Alert log Primary
-tail -f /u01/app/oracle/diag/rdbms/orcl/ORCL/trace/alert_ORCL.log
+**FSFO suspended (ORA-16820):**
+```bash
+ansible-playbook install/install_observer.yml
+```
 
-# Alert log Standby
-tail -f /u01/app/oracle/diag/rdbms/orcl_stby/ORCL/trace/alert_ORCL.log
+**DB bị ORA-01109 (database not open):**
+```bash
+ansible-playbook operations/restart_crashed_db.yml
+```
 
-# Kiểm tra MRP trên Standby
-su - oracle -c "sqlplus / as sysdba" << 'EOF'
-SELECT PROCESS, STATUS, SEQUENCE# FROM V$MANAGED_STANDBY WHERE PROCESS IN ('MRP0','RFS');
-EXIT;
-EOF
+**Sau failover, con crash không tự reinstate:**
+```bash
+# Chạy restart playbook (có manual reinstate)
+ansible-playbook operations/restart_crashed_db.yml
 
-# Apply lag / Transport lag
-su - oracle -c "dgmgrl sys/Oracle_4U@ORCL 'show database ORCL_STBY'"
+# Hoặc manual từ Primary hiện tại:
+dgmgrl sys/Oracle_4U@<PRIMARY_TNS> 'REINSTATE DATABASE <DB_NAME>;'
 ```
