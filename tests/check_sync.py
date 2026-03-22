@@ -7,7 +7,7 @@ Standby : 192.168.1.196:1521/orclpdb1  (READ ONLY — mở tạm để query)
 import oracledb
 
 PRIMARY = {"host": "192.168.1.195", "port": 1521, "service": "orclpdb1",
-           "user": "chirag", "password": "Tiger123"}
+           "user": "osp", "password": "Osp@123"}
 
 STANDBY = {"host": "192.168.1.196", "port": 1521, "service": "orclpdb1",
            "user": "sys", "password": "Oracle_4U", "mode": oracledb.AUTH_MODE_SYSDBA}
@@ -85,13 +85,13 @@ def read_standby():
 
         # Đếm rows
         try:
-            cur.execute("SELECT COUNT(*) FROM chirag.employees")
+            cur.execute("SELECT COUNT(*) FROM osp.employees")
             count = cur.fetchone()[0]
             print(f"  employees rows : {count}")
 
             cur.execute("""
                 SELECT id, name, dept, salary
-                FROM chirag.employees
+                FROM osp.employees
                 ORDER BY id DESC
                 FETCH FIRST 3 ROWS ONLY
             """)

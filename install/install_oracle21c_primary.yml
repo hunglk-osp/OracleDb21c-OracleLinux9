@@ -24,8 +24,8 @@
     sys_password: "Oracle_4U"
     system_password: "Oracle_4U"
     pdb_admin_password: "Oracle_4U"
-    db_username: chirag
-    db_user_password: "Tiger123"
+    db_username: osp
+    db_user_password: "Osp@123"
     hostname_fqdn: primarydb.local                   # [FIX-3] Khác với standby
     hostname_short: primarydb
     listener_port: 1521

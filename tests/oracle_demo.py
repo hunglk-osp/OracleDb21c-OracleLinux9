@@ -3,7 +3,7 @@ oracle_demo.py — Học quản lý Oracle DB cơ bản bằng Python
 Thư viện: oracledb (pip install oracledb)
 
 Kết nối: Data Guard failover — Primary 192.168.1.195, Standby 192.168.1.196
-User   : chirag / Tiger123
+User   : osp / Osp@123
 """
 
 import oracledb
@@ -12,8 +12,8 @@ import oracledb
 # CẤU HÌNH KẾT NỐI — Data Guard Failover DSN
 # Tự động thử Primary trước, nếu chết thì kết nối Standby
 # ─────────────────────────────────────────────
-USER     = "chirag"
-PASSWORD = "Tiger123"
+USER     = "osp"
+PASSWORD = "Osp@123"
 SERVICE  = "orclpdb1"
 
 # Multi-host DSN chuẩn Data Guard

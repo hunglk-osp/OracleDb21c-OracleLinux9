@@ -207,7 +207,7 @@ Rồi lặp lại. Tất cả playbook tự detect — không cần sửa gì.
 Port         : 1521
 CDB SID      : ORCL
 PDB Service  : orclpdb1
-User         : chirag / Tiger123
+User         : osp / Osp@123
 SYS Password : Oracle_4U
 ```
 

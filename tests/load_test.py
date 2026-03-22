@@ -26,8 +26,8 @@ from rich import box
 HOSTS         = ["192.168.1.195", "192.168.1.196"]  # Danh sách host, thử lần lượt
 PORT          = 1521
 SERVICE       = "orclpdb1"
-USER          = "chirag"
-PASSWORD      = "Tiger123"
+USER          = "osp"
+PASSWORD      = "Osp@123"
 SYS_PASS      = "Oracle_4U"
 
 DURATION_SEC  = 120      # Chạy bao nhiêu giây — đủ lâu để test tắt/bật
@@ -163,7 +163,7 @@ def worker(stop_event, start_time):
 def count_records(host):
     """
     Đếm records trên host — thử theo thứ tự:
-    1. Connect bằng user chirag qua orclpdb1 (chỉ Primary có thể DML, nhưng cả Standby cũng có thể đọc)
+    1. Connect bằng user osp qua orclpdb1 (chỉ Primary có thể DML, nhưng cả Standby cũng có thể đọc)
     2. Connect bằng sys qua orclpdb1 (Standby READ ONLY)
     3. Fallback: connect bằng sys qua CDB (SID=ORCL) rồi switch container
     """
