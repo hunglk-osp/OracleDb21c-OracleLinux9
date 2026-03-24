@@ -247,7 +247,6 @@ def make_live_panel(elapsed, start_time):
         table.add_row("Last error", f"[dim red]{last_error}[/dim red]")
 
     title = "[bold yellow]ORACLE DATA GUARD — LOAD TEST (Auto-Failover)[/bold yellow]"
-    hint  = "[dim]Tắt bất kỳ host nào — app tự chuyển sang host còn lại[/dim]"
     return Panel(table, title=title, subtitle=hint, border_style="yellow")
 
 
