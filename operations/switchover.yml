@@ -196,6 +196,104 @@
         seconds: 30
 
 # ═══════════════════════════════════════════════════════
+# PHASE 3b: Startup Standby mới (node vừa là Primary)
+# Broker đã mount DB nhưng chưa OPEN READ ONLY + MRP
+# ═══════════════════════════════════════════════════════
+- name: "PHASE 3b: Startup Standby mới sau switchover"
+  hosts: primary,standby
+  become: yes
+  vars:
+    oracle_home: /u01/app/oracle/product/21c/dbhome_1
+    oracle_sid: ORCL
+    sys_password: "Oracle_4U"
+
+  tasks:
+    - name: "STANDBY: Re-detect role sau switchover"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+        SELECT TRIM(DATABASE_ROLE)||'|'||TRIM(OPEN_MODE) FROM V$DATABASE;
+        EXIT;
+        EOF
+      register: new_role
+      changed_when: false
+      failed_when: false
+
+    - name: "STANDBY: Set facts"
+      set_fact:
+        is_new_standby: "{{ 'PHYSICAL STANDBY' in (new_role.stdout | default('')) }}"
+        is_new_primary: "{{ 'PRIMARY' in (new_role.stdout | default('')) and 'READ WRITE' in (new_role.stdout | default('')) }}"
+        standby_needs_open: >-
+          {{
+            'PHYSICAL STANDBY' in (new_role.stdout | default('')) and
+            'READ ONLY' not in (new_role.stdout | default(''))
+          }}
+        standby_instance_down: "{{ new_role.stdout | default('') | trim == '' or 'ORA-' in (new_role.stdout | default('')) }}"
+
+    - name: "STANDBY: Show detected role"
+      debug:
+        msg: "{{ inventory_hostname }}: {{ new_role.stdout | default('INSTANCE DOWN') | trim }}"
+
+    - name: "STANDBY: Startup mount (nếu instance down)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        STARTUP MOUNT;
+        EXIT;
+        EOF
+      when: standby_instance_down | bool
+      failed_when: false
+
+    - name: "STANDBY: Wait after startup mount (15s)"
+      pause:
+        seconds: 15
+      when: standby_instance_down | bool
+
+    - name: "STANDBY: Open READ ONLY (Standby MOUNTED)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        ALTER DATABASE OPEN READ ONLY;
+        EXIT;
+        EOF
+      when: is_new_standby | bool and (standby_needs_open | bool or standby_instance_down | bool)
+      failed_when: false
+
+    - name: "STANDBY: Open PDB READ ONLY"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        ALTER PLUGGABLE DATABASE ALL OPEN READ ONLY;
+        EXIT;
+        EOF
+      when: is_new_standby | bool
+      failed_when: false
+
+    - name: "STANDBY: Start MRP"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        ALTER DATABASE RECOVER MANAGED STANDBY DATABASE USING CURRENT LOGFILE DISCONNECT FROM SESSION;
+        EXIT;
+        EOF
+      when: is_new_standby | bool
+      failed_when: false
+
+    - name: "STANDBY: Reload listener"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} PATH={{ oracle_home }}/bin:$PATH
+        lsnrctl reload 2>&1
+      when: is_new_standby | bool
+      failed_when: false
+
+# ═══════════════════════════════════════════════════════
 # PHASE 4: Verify kết quả sau switchover
 # ═══════════════════════════════════════════════════════
 - name: "PHASE 4: Verify trạng thái sau switchover"
@@ -353,12 +451,12 @@
       debug:
         msg: "{{ observer_restart.stdout_lines }}"
 
-    - name: "OBSERVER: Wait for observer to connect (25s)"
+    - name: "OBSERVER: Wait for observer to connect (40s)"
       pause:
-        seconds: 25
+        seconds: 40
 
     - name: "OBSERVER: Verify observer process"
-      shell: ps -ef | grep dgmgrl | grep -v grep || echo "(not running)"
+      shell: ps -ef | grep -E 'dgmgrl|run_observer' | grep -v grep || echo "(not running)"
       register: obs_proc
       changed_when: false
 
