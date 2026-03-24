@@ -1,0 +1,274 @@
+# cleanup_oracle21c.yml
+# Clean Oracle Database 21c hoàn toàn — chạy được trên remote host qua SSH
+# Idempotent, không hỏi confirm, tự dọn sạch tất cả để cài lại từ đầu
+# Dùng trước khi chạy install_oracle21c_primary.yml hoặc install_oracle21c_standby.yml
+---
+- name: Cleanup Oracle Database 21c - Full Clean
+  hosts: all
+  become: yes
+  vars:
+    oracle_base: /u01/app/oracle
+    oracle_home: /u01/app/oracle/product/21c/dbhome_1
+    oracle_inventory: /u01/app/oraInventory
+    oracle_sid: ORCL
+    zip_file_remote: /tmp/LINUX.X64_213000_db_home.zip
+
+  tasks:
+    - name: "INFO: Target host"
+      debug:
+        msg: "Cleaning Oracle on {{ inventory_hostname }} ({{ ansible_default_ipv4.address }})"
+      tags: [always]
+
+    # ==========================================
+    # STEP 1: Stop Oracle Services
+    # ==========================================
+    - name: "STEP 1.1: Stop oracle-db systemd service"
+      systemd:
+        name: oracle-db
+        state: stopped
+      failed_when: false
+      tags: [cleanup]
+
+    - name: "STEP 1.2: Disable oracle-db systemd service"
+      systemd:
+        name: oracle-db
+        enabled: no
+      failed_when: false
+      tags: [cleanup]
+
+    - name: "STEP 1.3: Stop listener (nếu oracle user tồn tại)"
+      shell: |
+        if id oracle &>/dev/null && [ -f {{ oracle_home }}/bin/lsnrctl ]; then
+          su - oracle -c "export ORACLE_HOME={{ oracle_home }}; export PATH={{ oracle_home }}/bin:\$PATH; lsnrctl stop" || true
+        fi
+      failed_when: false
+      tags: [cleanup]
+
+    - name: "STEP 1.4: Shutdown Oracle DB via sqlplus (nếu có)"
+      shell: |
+        if id oracle &>/dev/null && [ -f {{ oracle_home }}/bin/sqlplus ]; then
+          mkdir -p {{ oracle_base }}/admin/{{ oracle_sid }}/adump
+          chown oracle:oinstall {{ oracle_base }}/admin/{{ oracle_sid }}/adump || true
+          printf 'connect / as sysdba\nSHUTDOWN ABORT;\nEXIT;\n' > /tmp/oracle_shutdown.sql
+          chown oracle:oinstall /tmp/oracle_shutdown.sql
+          su - oracle -c "export ORACLE_HOME={{ oracle_home }}; export ORACLE_SID={{ oracle_sid }}; export PATH={{ oracle_home }}/bin:\$PATH; sqlplus /nolog @/tmp/oracle_shutdown.sql" || true
+          rm -f /tmp/oracle_shutdown.sql
+        fi
+      failed_when: false
+      tags: [cleanup]
+
+    - name: "STEP 1.5: Kill tất cả oracle processes"
+      shell: |
+        pkill -9 -u oracle 2>/dev/null || true
+        sleep 3
+        pgrep -u oracle && pkill -9 -u oracle 2>/dev/null || true
+      failed_when: false
+      tags: [cleanup]
+
+    # ==========================================
+    # STEP 2: Dọn Shared Memory & Semaphores
+    # ==========================================
+    - name: "STEP 2.1: Remove Oracle shared memory segments"
+      shell: |
+        ipcs -m | awk '/oracle/ {print $2}' | while read shmid; do
+          ipcrm -m $shmid 2>/dev/null || true
+        done
+        # Cũng xóa các segment không có owner (zombie sau kill)
+        ipcs -m | awk 'NR>3 && $6 == "0" {print $2}' | while read shmid; do
+          ipcrm -m $shmid 2>/dev/null || true
+        done
+      failed_when: false
+      tags: [cleanup]
+
+    - name: "STEP 2.2: Remove Oracle semaphores"
+      shell: |
+        ipcs -s | awk '/oracle/ {print $2}' | while read semid; do
+          ipcrm -s $semid 2>/dev/null || true
+        done
+      failed_when: false
+      tags: [cleanup]
+
+    # ==========================================
+    # STEP 3: Remove Systemd Service File
+    # ==========================================
+    - name: "STEP 3.1: Remove oracle-db.service file"
+      file:
+        path: /etc/systemd/system/oracle-db.service
+        state: absent
+      tags: [cleanup]
+
+    - name: "STEP 3.2: Reload systemd"
+      systemd:
+        daemon_reload: yes
+      tags: [cleanup]
+
+    # ==========================================
+    # STEP 4: Remove Firewall Rules
+    # ==========================================
+    - name: "STEP 4.1: Remove firewall rule 1521/tcp"
+      firewalld:
+        port: 1521/tcp
+        permanent: yes
+        state: disabled
+        immediate: yes
+      failed_when: false
+      tags: [cleanup]
+
+    # ==========================================
+    # STEP 5: Remove Oracle Directories
+    # ==========================================
+    - name: "STEP 5.1: Remove /u01 (Oracle base, data, inventory)"
+      file:
+        path: /u01
+        state: absent
+      tags: [cleanup]
+
+    - name: "STEP 5.2: Remove Oracle inventory ngoài /u01 (nếu có)"
+      file:
+        path: "{{ oracle_inventory }}"
+        state: absent
+      failed_when: false
+      tags: [cleanup]
+
+    # ==========================================
+    # STEP 6: Remove Oracle User & Groups
+    # ==========================================
+    - name: "STEP 6.1: Remove oracle user (+ home dir)"
+      user:
+        name: oracle
+        state: absent
+        remove: yes
+        force: yes
+      failed_when: false
+      tags: [cleanup]
+
+    - name: "STEP 6.2: Remove Oracle groups"
+      group:
+        name: "{{ item }}"
+        state: absent
+      loop:
+        - racdba
+        - kmdba
+        - dgdba
+        - backupdba
+        - oper
+        - dba
+        - oinstall
+      failed_when: false
+      tags: [cleanup]
+
+    # ==========================================
+    # STEP 7: Clean Configuration Files
+    # ==========================================
+    - name: "STEP 7.1: Remove oratab entries"
+      lineinfile:
+        path: /etc/oratab
+        regexp: "^{{ oracle_sid }}:"
+        state: absent
+      failed_when: false
+      tags: [cleanup]
+
+    - name: "STEP 7.2: Remove Oracle env từ root .bash_profile"
+      blockinfile:
+        path: /root/.bash_profile
+        marker: "# {mark} ANSIBLE MANAGED - Oracle"
+        state: absent
+      failed_when: false
+      tags: [cleanup]
+
+    - name: "STEP 7.3: Remove hostname entries oracle/primary/standby từ /etc/hosts"
+      lineinfile:
+        path: /etc/hosts
+        regexp: ".*{{ item }}.*"
+        state: absent
+      loop:
+        - primarydb
+        - standbydb
+        - oracledb
+      tags: [cleanup]
+
+    # ==========================================
+    # STEP 8: Clean Temporary Files
+    # ==========================================
+    - name: "STEP 8.1: Remove Oracle temp/install files"
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/db_install.rsp
+        - /tmp/compat-openssl10.rpm
+        - /tmp/oracle-preinstall-21c.rpm
+        - /tmp/stat_wrap.c
+        - /tmp/stat_wrap.o
+        - /tmp/.oracle
+        - /var/tmp/.oracle
+      failed_when: false
+      tags: [cleanup]
+
+    # ==========================================
+    # STEP 9: Remove dummy libpthread
+    # ==========================================
+    - name: "STEP 9.1: Remove dummy libpthread_nonshared.a (nếu là file rỗng do ansible tạo)"
+      shell: |
+        if [ -f /usr/lib64/libpthread_nonshared.a ]; then
+          size=$(stat -c%s /usr/lib64/libpthread_nonshared.a)
+          if [ "$size" -le 32 ]; then
+            rm -f /usr/lib64/libpthread_nonshared.a
+            echo "removed dummy"
+          else
+            echo "real file, kept"
+          fi
+        else
+          echo "not exists"
+        fi
+      register: libpthread_cleanup
+      changed_when: "'removed' in libpthread_cleanup.stdout"
+      tags: [cleanup]
+
+    # ==========================================
+    # STEP 10: Verify Clean
+    # ==========================================
+    - name: "STEP 10.1: Verify oracle processes gone"
+      shell: pgrep -u oracle || echo "NONE"
+      register: oracle_procs
+      failed_when: false
+      changed_when: false
+      tags: [cleanup, verify]
+
+    - name: "STEP 10.2: Verify /u01 removed"
+      stat:
+        path: /u01
+      register: u01_stat
+      tags: [cleanup, verify]
+
+    - name: "STEP 10.3: Verify oracle user removed"
+      shell: id oracle 2>&1 || echo "USER_REMOVED"
+      register: oracle_user_check
+      changed_when: false
+      tags: [cleanup, verify]
+
+    - name: "STEP 10.4: List remaining Oracle RPMs"
+      shell: rpm -qa | grep -i oracle || echo "NONE"
+      register: oracle_rpms
+      changed_when: false
+      tags: [cleanup, verify]
+
+    # ==========================================
+    # FINAL: Summary
+    # ==========================================
+    - name: "CLEANUP SUMMARY"
+      debug:
+        msg:
+          - "=========================================="
+          - "ORACLE CLEANUP COMPLETE - {{ inventory_hostname }}"
+          - "=========================================="
+          - "Oracle processes : {{ oracle_procs.stdout | trim }}"
+          - "/u01 exists      : {{ u01_stat.stat.exists }}"
+          - "Oracle user      : {{ oracle_user_check.stdout | trim }}"
+          - "Oracle RPMs      : {{ oracle_rpms.stdout_lines }}"
+          - ""
+          - "ZIP file giữ lại : {{ zip_file_remote }}"
+          - ""
+          - "System sẵn sàng để cài Oracle lại!"
+          - "=========================================="
+      tags: [always]

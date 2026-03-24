@@ -1,0 +1,310 @@
+---
+# restart_crashed_db.yml
+# Khôi phục Oracle DB sau sự cố (crash/kill -9/systemctl stop/mất điện)
+#
+# Xử lý TẤT CẢ trường hợp:
+#   1. DB bị crash (kill -9) → instance chết hoàn toàn
+#   2. DB bị stop (systemctl stop) → instance chết sạch
+#   3. DB đang MOUNTED nhưng chưa OPEN (sau reinstate)
+#   4. DB đang chạy bình thường → skip
+#
+# Chạy: ansible-playbook operations/restart_crashed_db.yml
+#
+# Quy trình khôi phục:
+#   PHASE 1: Đánh giá — instance/listener/DB role/PDB/MRP
+#   PHASE 2: Khôi phục — start listener → startup mount → đợi reinstate
+#            → open read only → open PDB → start MRP → reload listener
+#   PHASE 3: Verify — hiển thị trạng thái cuối cùng
+
+- name: "RESTART — Khôi phục Oracle DB sau sự cố"
+  hosts: primary,standby
+  become: yes
+  vars:
+    oracle_home: /u01/app/oracle/product/21c/dbhome_1
+    oracle_sid: ORCL
+    sys_password: "Oracle_4U"
+
+  tasks:
+
+    # ════════════════════════════════════════════
+    # PHASE 1: Đánh giá tình trạng hiện tại
+    # ════════════════════════════════════════════
+
+    - name: "ASSESS: Check Oracle pmon process"
+      shell: ps -ef | grep '[o]ra_pmon_{{ oracle_sid }}' | wc -l
+      register: pmon_count
+      changed_when: false
+
+    - name: "ASSESS: Check listener"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} PATH={{ oracle_home }}/bin:$PATH
+        lsnrctl status 2>&1 | grep -c "Instance" || echo "0"
+      register: listener_check
+      changed_when: false
+      failed_when: false
+
+    - name: "ASSESS: Check instance status (nếu pmon chạy)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF LINESIZE 200
+        SELECT TRIM(STATUS) FROM V$INSTANCE;
+        EXIT;
+        EOF
+      register: instance_status
+      changed_when: false
+      failed_when: false
+      when: pmon_count.stdout | trim | int > 0
+
+    - name: "ASSESS: Check DB role + open mode (nếu MOUNTED/OPEN)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF LINESIZE 200
+        SELECT TRIM(DATABASE_ROLE)||'|'||TRIM(OPEN_MODE)||'|'||TRIM(DB_UNIQUE_NAME) FROM V$DATABASE;
+        EXIT;
+        EOF
+      register: db_info
+      changed_when: false
+      failed_when: false
+      when:
+        - pmon_count.stdout | trim | int > 0
+        - instance_status.stdout is defined
+        - "'STARTED' not in instance_status.stdout"
+
+    - name: "ASSESS: Set assessment facts"
+      set_fact:
+        is_down: "{{ pmon_count.stdout | trim | int == 0 }}"
+        is_mounted_only: "{{ (db_info.stdout | default('')) is search('MOUNTED') and (db_info.stdout | default('')) is not search('READ') }}"
+        is_standby: "{{ (db_info.stdout | default('')) is search('PHYSICAL STANDBY') }}"
+        is_primary_open: "{{ (db_info.stdout | default('')) is search('PRIMARY') and (db_info.stdout | default('')) is search('READ WRITE') }}"
+        listener_down: "{{ (listener_check.stdout | default('0')) | trim | int == 0 }}"
+
+    - name: "ASSESS: Show current state"
+      debug:
+        msg: >-
+          {{ inventory_hostname }} ({{ ansible_host }}):
+          {% if is_down | bool %}INSTANCE DOWN
+          {% elif is_primary_open | bool %}PRIMARY READ WRITE — OK
+          {% elif is_standby | bool and not (is_mounted_only | bool) %}STANDBY {{ db_info.stdout | trim }}
+          {% elif is_mounted_only | bool %}MOUNTED (needs OPEN) — {{ db_info.stdout | trim }}
+          {% else %}{{ instance_status.stdout | default('?') | trim }}
+          {% endif %}
+          | listener={{ 'DOWN' if (listener_down | bool) else 'UP' }}
+
+    # ════════════════════════════════════════════
+    # PHASE 2: Khôi phục từng thành phần
+    # ════════════════════════════════════════════
+
+    # ── 2a. Start listener ──
+    - name: "FIX: Start listener"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} PATH={{ oracle_home }}/bin:$PATH
+        lsnrctl start 2>&1
+      when: listener_down | bool
+      failed_when: false
+
+    # ── 2b. Start instance (nếu down hoàn toàn) ──
+    - name: "FIX: Startup mount (instance down)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        STARTUP MOUNT;
+        EXIT;
+        EOF
+      when: is_down | bool
+      register: startup_result
+      failed_when: false
+
+    - name: "FIX: Show startup result"
+      debug:
+        msg: "{{ startup_result.stdout_lines }}"
+      when: startup_result is changed
+
+    # ── 2c. Đợi Observer auto-reinstate ──
+    - name: "WAIT: Đợi Observer auto-reinstate (40s)"
+      pause:
+        seconds: 40
+      when: is_down | bool
+
+    # ── 2d. Re-check role sau reinstate ──
+    - name: "RECHECK: DB role sau reinstate/startup"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF LINESIZE 200
+        SELECT TRIM(DATABASE_ROLE)||'|'||TRIM(OPEN_MODE)||'|'||TRIM(DB_UNIQUE_NAME) FROM V$DATABASE;
+        EXIT;
+        EOF
+      register: db_recheck
+      changed_when: false
+      failed_when: false
+      when: is_down | bool or is_mounted_only | bool
+
+    - name: "RECHECK: Update facts after reinstate"
+      set_fact:
+        now_standby: "{{ 'PHYSICAL STANDBY' in (db_recheck.stdout | default(db_info.stdout | default(''))) }}"
+        now_mounted: "{{ (db_recheck.stdout | default(db_info.stdout | default(''))) is search('MOUNTED') and (db_recheck.stdout | default(db_info.stdout | default(''))) is not search('READ') }}"
+        now_primary_mounted: "{{ (db_recheck.stdout | default(db_info.stdout | default(''))) is search('PRIMARY') and (db_recheck.stdout | default(db_info.stdout | default(''))) is search('MOUNTED') and (db_recheck.stdout | default(db_info.stdout | default(''))) is not search('READ') }}"
+
+    # ── 2e. Manual reinstate (nếu vẫn PRIMARY MOUNTED — Observer chưa reinstate) ──
+    - name: "FIX: Manual reinstate (PRIMARY MOUNTED → cần reinstate thành Standby)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        MY_NAME=$(sqlplus -s / as sysdba << 'SQLEOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+        SELECT TRIM(DB_UNIQUE_NAME) FROM V$DATABASE;
+        EXIT;
+        SQLEOF
+        )
+        MY_NAME=$(echo "$MY_NAME" | grep -v '^$' | head -1 | tr -d ' ')
+        echo "Reinstating ${MY_NAME}..."
+        for TNS in ORCL ORCL_STBY; do
+          RESULT=$(printf "REINSTATE DATABASE ${MY_NAME};\nEXIT;\n" | \
+            dgmgrl sys/{{ sys_password }}@${TNS} 2>&1)
+          echo "${TNS}: ${RESULT}"
+          if echo "$RESULT" | grep -qi "succeeded\|already"; then
+            echo "REINSTATE OK via ${TNS}"
+            break
+          fi
+        done
+      when: now_primary_mounted | bool
+      register: reinstate_result
+      failed_when: false
+
+    - name: "FIX: Show reinstate result"
+      debug:
+        msg: "{{ reinstate_result.stdout_lines }}"
+      when: reinstate_result is changed
+
+    - name: "WAIT: Đợi sau manual reinstate (20s)"
+      pause:
+        seconds: 20
+      when: reinstate_result is changed
+
+    # ── 2f. Re-check final role sau reinstate (để biết là Standby hay Primary) ──
+    - name: "RECHECK: Final role sau reinstate"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF LINESIZE 200
+        SELECT TRIM(DATABASE_ROLE)||'|'||TRIM(OPEN_MODE) FROM V$DATABASE;
+        EXIT;
+        EOF
+      register: final_role_check
+      changed_when: false
+      failed_when: false
+
+    - name: "RECHECK: Set final role facts"
+      set_fact:
+        final_is_standby: "{{ 'PHYSICAL STANDBY' in (final_role_check.stdout | default('')) }}"
+        final_is_primary: "{{ 'PRIMARY' in (final_role_check.stdout | default('')) and 'READ WRITE' in (final_role_check.stdout | default('')) }}"
+        final_needs_open: >-
+          {{
+            (final_role_check.stdout | default('')) is search('MOUNTED') and
+            (final_role_check.stdout | default('')) is not search('READ')
+          }}
+
+    - name: "RECHECK: Show final role"
+      debug:
+        msg: "{{ inventory_hostname }}: {{ final_role_check.stdout | default('unknown') | trim }} | standby={{ final_is_standby }} primary={{ final_is_primary }} needs_open={{ final_needs_open }}"
+
+    # ── 2g. Open database READ ONLY (chỉ khi là Standby đang MOUNTED) ──
+    - name: "FIX: Open database READ ONLY (Standby MOUNTED)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        ALTER DATABASE OPEN READ ONLY;
+        EXIT;
+        EOF
+      when:
+        - final_is_standby | bool
+        - final_needs_open | bool
+      failed_when: false
+
+    # ── 2h. Open PDB (chỉ khi là Standby) ──
+    - name: "FIX: Open PDB read only"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        ALTER PLUGGABLE DATABASE ALL OPEN READ ONLY;
+        EXIT;
+        EOF
+      when: final_is_standby | bool
+      failed_when: false
+
+    # ── 2i. Start MRP (chỉ khi là Standby) ──
+    - name: "FIX: Start Managed Recovery Process"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        ALTER DATABASE RECOVER MANAGED STANDBY DATABASE USING CURRENT LOGFILE DISCONNECT FROM SESSION;
+        EXIT;
+        EOF
+      when: final_is_standby | bool
+      failed_when: false
+
+    # ── 2j. Reload listener ──
+    - name: "FIX: Reload listener (đăng ký service mới)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} PATH={{ oracle_home }}/bin:$PATH
+        lsnrctl reload 2>&1
+      when: is_down | bool or is_mounted_only | bool or (listener_down | bool)
+      failed_when: false
+
+    # ════════════════════════════════════════════
+    # PHASE 3: Verify kết quả cuối cùng
+    # ════════════════════════════════════════════
+
+    - name: "VERIFY: Final status"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET LINESIZE 200 PAGESIZE 50
+        COL DATABASE_ROLE FORMAT A20
+        COL OPEN_MODE FORMAT A25
+        COL DB_UNIQUE_NAME FORMAT A15
+        PROMPT === DATABASE ===
+        SELECT DATABASE_ROLE, OPEN_MODE, DB_UNIQUE_NAME FROM V$DATABASE;
+
+        COL NAME FORMAT A15
+        COL OPEN_MODE FORMAT A15
+        PROMPT === PDB ===
+        SELECT NAME, OPEN_MODE FROM V$PDBS WHERE NAME != 'PDB$SEED';
+
+        COL PROCESS FORMAT A10
+        COL STATUS FORMAT A15
+        PROMPT === MRP/RFS ===
+        SELECT PROCESS, STATUS, SEQUENCE# FROM V$MANAGED_STANDBY
+        WHERE PROCESS IN ('MRP0','RFS') ORDER BY PROCESS;
+        EXIT;
+        EOF
+      register: final_status
+      changed_when: false
+      failed_when: false
+
+    - name: "VERIFY: Show final status"
+      debug:
+        msg: "{{ final_status.stdout_lines }}"
+
+    # ── Skip message cho DB đang chạy ──
+    - name: "SKIP: DB đã chạy bình thường — không cần khôi phục"
+      debug:
+        msg: "{{ inventory_hostname }} ({{ ansible_host }}): {{ db_info.stdout | default('') | trim }} — OK, skip"
+      when:
+        - not (is_down | bool)
+        - not (is_mounted_only | bool)
+        - is_primary_open | bool or (is_standby | bool and not (is_mounted_only | bool))

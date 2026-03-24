@@ -1,0 +1,53 @@
+---
+# crash_standby_test.yml
+# Simulate Oracle crash bằng kill -9 trên con đang là STANDBY
+# Tự detect ai là Standby rồi kill — không hardcode 195 hay 196
+#
+# Chạy: ansible-playbook -i inventory.ini crash_standby_test.yml
+
+- name: "CRASH STANDBY — Detect và Kill con đang là STANDBY"
+  hosts: primary,standby
+  become: yes
+  serial: 1
+  vars:
+    oracle_home: /u01/app/oracle/product/21c/dbhome_1
+    oracle_sid: ORCL
+
+  tasks:
+
+    - name: "DETECT: Check DATABASE_ROLE"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+        SELECT TRIM(DATABASE_ROLE)||'|'||TRIM(OPEN_MODE) FROM V$DATABASE;
+        EXIT;
+        EOF
+      register: db_role
+      changed_when: false
+      failed_when: false
+
+    - name: "DETECT: Show role"
+      debug:
+        msg: "{{ inventory_hostname }} ({{ ansible_host }}): {{ db_role.stdout | trim }}"
+
+    - name: "DETECT: Set is_standby"
+      set_fact:
+        is_standby: "{{ 'PHYSICAL STANDBY' in db_role.stdout }}"
+
+    - name: "CRASH: Kill Oracle processes on Standby (simulate crash)"
+      shell: |
+        echo "=== KILLING Oracle on {{ ansible_host }} (STANDBY) ==="
+        kill -9 $(ps -ef | grep '[o]ra_.*ORCL' | awk '{print $2}') 2>/dev/null || true
+        kill -9 $(ps -ef | grep '[t]nslsnr' | awk '{print $2}') 2>/dev/null || true
+        sleep 1
+        REMAINING=$(ps -ef | grep '[o]ra_.*ORCL' | wc -l)
+        echo "Oracle processes remaining: ${REMAINING}"
+        echo "CRASH DONE"
+      when: is_standby | bool
+
+    - name: "SKIP: Host này là Primary — không kill"
+      debug:
+        msg: "{{ inventory_hostname }} ({{ ansible_host }}) là PRIMARY — skip"
+      when: not (is_standby | bool)
