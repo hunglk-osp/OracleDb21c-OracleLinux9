@@ -1,0 +1,193 @@
+---
+# rman_backup.yml
+# RMAN Backup từ Standby — offload I/O khỏi Primary
+#
+# Mục đích:
+#   - Backup DB + archive logs từ Standby (không ảnh hưởng Primary)
+#   - Tự detect ai đang là Standby rồi chạy backup trên đó
+#   - Xóa archive logs cũ sau khi backup
+#
+# Chạy: ansible-playbook operations/rman_backup.yml
+#
+# Tuỳ chọn:
+#   --tags setup   : Chỉ tạo thư mục + configure RMAN (chạy 1 lần đầu)
+#   --tags backup  : Chỉ chạy backup (dùng cho cron)
+#   --tags purge   : Chỉ purge archive logs cũ
+#   (không có --tags = chạy tất cả)
+
+- name: "RMAN BACKUP — Detect Standby + Backup"
+  hosts: primary,standby
+  become: yes
+  vars:
+    oracle_home: /u01/app/oracle/product/21c/dbhome_1
+    oracle_sid: ORCL
+    sys_password: "Oracle_4U"
+    backup_dir: /u01/backup/rman
+    retention_days: 7
+    archive_keep_days: 3
+
+  tasks:
+
+    # ════════════════════════════════════════
+    # PHASE 1: Detect Standby
+    # ════════════════════════════════════════
+
+    - name: "DETECT: Check DATABASE_ROLE"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+        SELECT TRIM(DATABASE_ROLE)||'|'||TRIM(DB_UNIQUE_NAME) FROM V$DATABASE;
+        EXIT;
+        EOF
+      register: db_info
+      changed_when: false
+      failed_when: false
+      tags: [always]
+
+    - name: "DETECT: Set facts"
+      set_fact:
+        is_standby: "{{ 'PHYSICAL STANDBY' in db_info.stdout }}"
+        db_unique_name: "{{ db_info.stdout.split('|')[1] | default('UNKNOWN') | trim }}"
+      tags: [always]
+
+    - name: "DETECT: Show role"
+      debug:
+        msg: "{{ inventory_hostname }} ({{ ansible_host }}): {{ db_info.stdout | trim }} — {{ 'STANDBY → sẽ backup' if is_standby | bool else 'PRIMARY → skip' }}"
+      tags: [always]
+
+    # ════════════════════════════════════════
+    # PHASE 2: Setup (chạy 1 lần đầu)
+    # ════════════════════════════════════════
+
+    - name: "SETUP: Tạo thư mục backup"
+      file:
+        path: "{{ backup_dir }}"
+        state: directory
+        owner: oracle
+        group: oinstall
+        mode: '0755'
+      when: is_standby | bool
+      tags: [setup, backup]
+
+    - name: "SETUP: Configure RMAN — retention + deletion policy"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        rman target / << 'EOF'
+        CONFIGURE RETENTION POLICY TO RECOVERY WINDOW OF {{ retention_days }} DAYS;
+        CONFIGURE BACKUP OPTIMIZATION ON;
+        CONFIGURE CONTROLFILE AUTOBACKUP ON;
+        CONFIGURE CONTROLFILE AUTOBACKUP FORMAT FOR DEVICE TYPE DISK TO '{{ backup_dir }}/%F';
+        CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON ALL STANDBY;
+        EOF
+      register: rman_config
+      changed_when: false
+      failed_when: false
+      when: is_standby | bool
+      tags: [setup]
+
+    - name: "SETUP: Show config result"
+      debug:
+        msg: "{{ rman_config.stdout_lines }}"
+      when: is_standby | bool
+      tags: [setup]
+
+    # ════════════════════════════════════════
+    # PHASE 3: Backup
+    # ════════════════════════════════════════
+
+    - name: "BACKUP: Run RMAN backup từ Standby"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        rman target / << 'EOF'
+        RUN {
+          ALLOCATE CHANNEL c1 DEVICE TYPE DISK FORMAT '{{ backup_dir }}/%d_%T_%s_%p.bkp';
+          BACKUP AS COMPRESSED BACKUPSET DATABASE
+            TAG '{{ db_unique_name }}_{{ ansible_date_time.date | replace("-","") }}'
+            PLUS ARCHIVELOG DELETE INPUT;
+          BACKUP CURRENT CONTROLFILE FORMAT '{{ backup_dir }}/%d_%T_ctl_%s.bkp';
+          RELEASE CHANNEL c1;
+        }
+        DELETE NOPROMPT OBSOLETE;
+        EOF
+      register: rman_backup
+      when: is_standby | bool
+      failed_when: >
+        rman_backup.rc != 0 and
+        'RMAN-' in (rman_backup.stdout | default('')) and
+        'completed' not in (rman_backup.stdout | default(''))
+      tags: [backup]
+
+    - name: "BACKUP: Show backup result"
+      debug:
+        msg: "{{ rman_backup.stdout_lines }}"
+      when: is_standby | bool
+      tags: [backup]
+
+    # ════════════════════════════════════════
+    # PHASE 4: Purge archive logs cũ
+    # ════════════════════════════════════════
+
+    - name: "PURGE: Xóa archive logs > {{ archive_keep_days }} ngày"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        rman target / << 'EOF'
+        DELETE NOPROMPT ARCHIVELOG ALL
+          COMPLETED BEFORE 'SYSDATE-{{ archive_keep_days }}';
+        EOF
+      register: purge_result
+      when: is_standby | bool
+      failed_when: false
+      tags: [purge, backup]
+
+    - name: "PURGE: Show purge result"
+      debug:
+        msg: "{{ purge_result.stdout_lines }}"
+      when: is_standby | bool
+      tags: [purge, backup]
+
+    # ════════════════════════════════════════
+    # PHASE 5: Verify — disk usage + backup list
+    # ════════════════════════════════════════
+
+    - name: "VERIFY: Disk usage sau backup"
+      shell: df -h /u01 && echo "---" && du -sh {{ backup_dir }}/* 2>/dev/null | tail -20
+      register: disk_usage
+      changed_when: false
+      when: is_standby | bool
+      tags: [backup, purge]
+
+    - name: "VERIFY: Show disk usage"
+      debug:
+        msg: "{{ disk_usage.stdout_lines }}"
+      when: is_standby | bool
+      tags: [backup, purge]
+
+    - name: "VERIFY: List backups"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        rman target / << 'EOF'
+        LIST BACKUP SUMMARY;
+        EOF
+      register: backup_list
+      changed_when: false
+      failed_when: false
+      when: is_standby | bool
+      tags: [backup]
+
+    - name: "VERIFY: Show backup list"
+      debug:
+        msg: "{{ backup_list.stdout_lines }}"
+      when: is_standby | bool
+      tags: [backup]
+
+    - name: "SKIP: Host này là Primary — không backup"
+      debug:
+        msg: "{{ inventory_hostname }} ({{ ansible_host }}) là PRIMARY — skip"
+      when: not (is_standby | bool)
+      tags: [always]

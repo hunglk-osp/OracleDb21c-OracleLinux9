@@ -247,7 +247,7 @@ def make_live_panel(elapsed, start_time):
         table.add_row("Last error", f"[dim red]{last_error}[/dim red]")
 
     title = "[bold yellow]ORACLE DATA GUARD — LOAD TEST (Auto-Failover)[/bold yellow]"
-    return Panel(table, title=title, subtitle=hint, border_style="yellow")
+    return Panel(table, title=title, border_style="yellow")
 
 
 # ── Main ──────────────────────────────────────────────────

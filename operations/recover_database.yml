@@ -1,0 +1,339 @@
+---
+# recover_database.yml
+# Point-in-time recovery Oracle Database 21c — Flashback hoặc RMAN Restore
+#
+# 3 mode (chọn qua -e "mode=<mode>"):
+#   flashback  : Flashback Database về restore point (nhanh, ~2 phút)
+#   rman       : RMAN restore + recover đến thời điểm chỉ định (chậm, ~30-60 phút)
+#   list       : Chỉ liệt kê restore points + RMAN backups hiện có (không làm gì)
+#
+# Ví dụ:
+#   ansible-playbook operations/recover_database.yml -e "mode=list"
+#   ansible-playbook operations/recover_database.yml -e "mode=flashback" -e "restore_point=before_test"
+#   ansible-playbook operations/recover_database.yml -e "mode=rman" -e "until_time='2026-03-24 10:00:00'"
+#
+# Yêu cầu:
+#   - mode=flashback : Flashback đã được enable, restore point tồn tại
+#   - mode=rman      : RMAN backup tồn tại trong /u01/backup/rman hoặc FRA
+#
+# SAU KHI RECOVER:
+#   ansible-playbook operations/restart_crashed_db.yml     ← sync lại Standby
+#   ansible-playbook install/install_observer.yml           ← re-enable FSFO
+
+- name: "RECOVER — Point-in-time recovery Oracle DG"
+  hosts: primary,standby
+  become: yes
+  vars:
+    oracle_home: /u01/app/oracle/product/21c/dbhome_1
+    oracle_sid: ORCL
+    sys_password: "Oracle_4U"
+    mode: "list"              # list | flashback | rman
+    restore_point: ""         # mode=flashback: tên restore point
+    until_time: ""            # mode=rman: thời điểm recover "YYYY-MM-DD HH24:MI:SS"
+    backup_dir: /u01/backup/rman
+
+  tasks:
+
+    # ════════════════════════════════════════
+    # PHASE 1: Detect vai trò
+    # ════════════════════════════════════════
+
+    - name: "DETECT: Check DATABASE_ROLE"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+        SELECT TRIM(DATABASE_ROLE)||'|'||TRIM(OPEN_MODE)||'|'||TRIM(DB_UNIQUE_NAME) FROM V$DATABASE;
+        EXIT;
+        EOF
+      register: db_info
+      changed_when: false
+      failed_when: false
+
+    - name: "DETECT: Set facts"
+      set_fact:
+        is_primary: "{{ 'PRIMARY' in db_info.stdout and 'READ WRITE' in db_info.stdout }}"
+        is_standby: "{{ 'PHYSICAL STANDBY' in db_info.stdout }}"
+        db_unique_name: "{{ db_info.stdout.split('|')[2] | default('UNKNOWN') | trim }}"
+
+    - name: "DETECT: Show role"
+      debug:
+        msg: "{{ inventory_hostname }} ({{ ansible_host }}): {{ db_info.stdout | trim }}"
+
+    # ════════════════════════════════════════
+    # PHASE 2: LIST — Xem restore points + backups
+    # ════════════════════════════════════════
+
+    - name: "LIST: Restore points hiện có (chỉ Primary)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET LINESIZE 200 PAGESIZE 50
+        COL NAME FORMAT A35
+        COL TIME FORMAT A30
+        COL GUARANTEE_FLASHBACK_DATABASE FORMAT A10
+        PROMPT === RESTORE POINTS ===
+        SELECT NAME, TO_CHAR(TIME,'YYYY-MM-DD HH24:MI:SS') AS TIME,
+               GUARANTEE_FLASHBACK_DATABASE
+        FROM V$RESTORE_POINT
+        ORDER BY TIME;
+
+        PROMPT
+        PROMPT === FLASHBACK LOG INFO ===
+        SELECT OLDEST_FLASHBACK_SCN,
+               TO_CHAR(OLDEST_FLASHBACK_TIME,'YYYY-MM-DD HH24:MI:SS') AS OLDEST_FLASHBACK_TIME
+        FROM V$FLASHBACK_DATABASE_LOG;
+        EXIT;
+        EOF
+      register: restore_points
+      changed_when: false
+      failed_when: false
+      when: is_primary | bool and mode == 'list'
+
+    - name: "LIST: Show restore points"
+      debug:
+        msg: "{{ restore_points.stdout_lines }}"
+      when: is_primary | bool and mode == 'list'
+
+    - name: "LIST: RMAN backups hiện có (chỉ Primary)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        rman target / << 'EOF'
+        LIST BACKUP SUMMARY;
+        LIST BACKUP OF DATABASE SUMMARY;
+        EOF
+      register: rman_list
+      changed_when: false
+      failed_when: false
+      when: is_primary | bool and mode == 'list'
+
+    - name: "LIST: Show RMAN backups"
+      debug:
+        msg: "{{ rman_list.stdout_lines }}"
+      when: is_primary | bool and mode == 'list'
+
+    # ════════════════════════════════════════
+    # PHASE 3: FLASHBACK DATABASE
+    # ════════════════════════════════════════
+
+    # ── 3a. Stop MRP trên Standby trước ──
+    - name: "FLASHBACK: Stop MRP trên Standby"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        ALTER DATABASE RECOVER MANAGED STANDBY DATABASE CANCEL;
+        EXIT;
+        EOF
+      when: is_standby | bool and mode == 'flashback'
+      failed_when: false
+
+    - name: "FLASHBACK: Validate restore_point không được để trống"
+      fail:
+        msg: "Thiếu tham số restore_point. Dùng: -e \"restore_point=<tên>\""
+      when: mode == 'flashback' and restore_point == ''
+
+    # ── 3b. Flashback Primary ──
+    - name: "FLASHBACK: Shutdown Primary"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SHUTDOWN IMMEDIATE;
+        EXIT;
+        EOF
+      when: is_primary | bool and mode == 'flashback'
+      failed_when: false
+
+    - name: "FLASHBACK: Startup Mount + Flashback Primary"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        STARTUP MOUNT;
+        FLASHBACK DATABASE TO RESTORE POINT {{ restore_point }};
+        ALTER DATABASE OPEN RESETLOGS;
+        ALTER PLUGGABLE DATABASE ALL OPEN;
+        EXIT;
+        EOF
+      register: flashback_primary
+      when: is_primary | bool and mode == 'flashback'
+      failed_when: false
+
+    - name: "FLASHBACK: Show Primary result"
+      debug:
+        msg: "{{ flashback_primary.stdout_lines }}"
+      when: is_primary | bool and mode == 'flashback'
+
+    # ── 3c. Flashback Standby về cùng điểm ──
+    - name: "FLASHBACK: Shutdown Standby"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SHUTDOWN IMMEDIATE;
+        EXIT;
+        EOF
+      when: is_standby | bool and mode == 'flashback'
+      failed_when: false
+
+    - name: "FLASHBACK: Startup Mount + Flashback Standby"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        STARTUP MOUNT;
+        FLASHBACK DATABASE TO RESTORE POINT {{ restore_point }};
+        ALTER DATABASE OPEN READ ONLY;
+        ALTER PLUGGABLE DATABASE ALL OPEN READ ONLY;
+        ALTER DATABASE RECOVER MANAGED STANDBY DATABASE USING CURRENT LOGFILE DISCONNECT FROM SESSION;
+        EXIT;
+        EOF
+      register: flashback_standby
+      when: is_standby | bool and mode == 'flashback'
+      failed_when: false
+
+    - name: "FLASHBACK: Show Standby result"
+      debug:
+        msg: "{{ flashback_standby.stdout_lines }}"
+      when: is_standby | bool and mode == 'flashback'
+
+    # ════════════════════════════════════════
+    # PHASE 4: RMAN RESTORE
+    # ════════════════════════════════════════
+
+    - name: "RMAN: Validate until_time không được để trống"
+      fail:
+        msg: "Thiếu tham số until_time. Dùng: -e \"until_time='YYYY-MM-DD HH24:MI:SS'\""
+      when: mode == 'rman' and until_time == ''
+
+    # ── 4a. Stop MRP trên Standby trước ──
+    - name: "RMAN: Stop MRP trên Standby"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        ALTER DATABASE RECOVER MANAGED STANDBY DATABASE CANCEL;
+        EXIT;
+        EOF
+      when: is_standby | bool and mode == 'rman'
+      failed_when: false
+
+    # ── 4b. RMAN restore trên Primary ──
+    - name: "RMAN: Shutdown Primary"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SHUTDOWN IMMEDIATE;
+        EXIT;
+        EOF
+      when: is_primary | bool and mode == 'rman'
+      failed_when: false
+
+    - name: "RMAN: Restore + Recover Primary đến '{{ until_time }}'"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        rman target / << 'EOF'
+        STARTUP MOUNT;
+        RUN {
+          SET UNTIL TIME "TO_DATE('{{ until_time }}', 'YYYY-MM-DD HH24:MI:SS')";
+          RESTORE DATABASE;
+          RECOVER DATABASE;
+        }
+        ALTER DATABASE OPEN RESETLOGS;
+        EOF
+      register: rman_restore
+      when: is_primary | bool and mode == 'rman'
+      failed_when: false
+
+    - name: "RMAN: Show restore result"
+      debug:
+        msg: "{{ rman_restore.stdout_lines }}"
+      when: is_primary | bool and mode == 'rman'
+
+    - name: "RMAN: Open PDB sau restore"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        ALTER PLUGGABLE DATABASE ALL OPEN;
+        EXIT;
+        EOF
+      when: is_primary | bool and mode == 'rman'
+      failed_when: false
+
+    # ── 4c. Sau RMAN restore → Standby cần rebuild ──
+    - name: "RMAN: Thông báo Standby cần resync sau RESETLOGS"
+      debug:
+        msg:
+          - "⚠️  Primary vừa OPEN RESETLOGS — SCN timeline thay đổi"
+          - "Standby ({{ ansible_host }}) không thể tự sync lại."
+          - ""
+          - "Chạy tiếp để resync Standby:"
+          - "  ansible-playbook operations/restart_crashed_db.yml"
+          - ""
+          - "Nếu Standby bị lỗi ORA-16700 hoặc MRP không start:"
+          - "  ansible-playbook setup/setup_standby.yml  ← rebuild Standby từ Primary mới"
+      when: is_standby | bool and mode == 'rman'
+
+    # ════════════════════════════════════════
+    # PHASE 5: VERIFY — trạng thái sau recover
+    # ════════════════════════════════════════
+
+    - name: "VERIFY: Final status"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET LINESIZE 200 PAGESIZE 50
+        COL DATABASE_ROLE FORMAT A20
+        COL OPEN_MODE FORMAT A25
+        COL DB_UNIQUE_NAME FORMAT A15
+
+        PROMPT === DATABASE ===
+        SELECT DATABASE_ROLE, OPEN_MODE, DB_UNIQUE_NAME FROM V$DATABASE;
+
+        COL NAME FORMAT A15
+        COL OPEN_MODE FORMAT A15
+        PROMPT === PDB ===
+        SELECT NAME, OPEN_MODE FROM V$PDBS WHERE NAME != 'PDB$SEED';
+
+        COL PROCESS FORMAT A10
+        COL STATUS FORMAT A15
+        PROMPT === MRP/RFS ===
+        SELECT PROCESS, STATUS, SEQUENCE# FROM V$MANAGED_STANDBY
+        WHERE PROCESS IN ('MRP0','RFS') ORDER BY PROCESS;
+        EXIT;
+        EOF
+      register: final_status
+      changed_when: false
+      failed_when: false
+      when: mode != 'list'
+
+    - name: "VERIFY: Show final status"
+      debug:
+        msg: "{{ final_status.stdout_lines }}"
+      when: mode != 'list'
+
+    - name: "VERIFY: Summary"
+      debug:
+        msg:
+          - "========================================="
+          - "RECOVER — HOÀN TẤT (mode={{ mode }})"
+          - "========================================="
+          - "{{ inventory_hostname }} ({{ ansible_host }}): {{ db_info.stdout | trim }}"
+          - ""
+          - "{% if mode == 'flashback' %}"
+          - "Restore point: {{ restore_point }}"
+          - "Cả 2 node đã flashback về cùng điểm — DG vẫn sync."
+          - "{% elif mode == 'rman' %}"
+          - "Until time: {{ until_time }}"
+          - "Primary đã restore. Chạy restart_crashed_db.yml để resync Standby."
+          - "{% endif %}"
+          - "========================================="
+      when: mode != 'list' and is_primary | bool
