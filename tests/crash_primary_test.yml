@@ -54,3 +54,67 @@
       debug:
         msg: "{{ inventory_hostname }} ({{ ansible_host }}) là STANDBY — skip"
       when: not (is_primary | bool)
+
+# ── Theo dõi downtime: đợi Standby promote lên Primary ──
+- name: "WAIT — Theo dõi Standby promote lên Primary"
+  hosts: primary,standby
+  become: yes
+  serial: 1
+  vars:
+    oracle_home: /u01/app/oracle/product/21c/dbhome_1
+    oracle_sid: ORCL
+    sys_password: "Oracle_4U"
+    max_wait_seconds: 120
+
+  tasks:
+    - name: "DETECT: Xác định Standby còn sống"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+        SELECT TRIM(DATABASE_ROLE)||'|'||TRIM(OPEN_MODE) FROM V$DATABASE;
+        EXIT;
+        EOF
+      register: db_role_after
+      changed_when: false
+      failed_when: false
+
+    - name: "DETECT: Set is_standby_alive"
+      set_fact:
+        is_standby_alive: "{{ 'PHYSICAL STANDBY' in db_role_after.stdout }}"
+        t_crash: "{{ ansible_date_time.epoch }}"
+
+    - name: "WAIT: Chờ Standby promote thành Primary (poll mỗi 5s, tối đa {{ max_wait_seconds }}s)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        START_TIME=$(date +%s)
+        while true; do
+          ROLE=$(sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+        SELECT TRIM(DATABASE_ROLE)||'|'||TRIM(OPEN_MODE) FROM V$DATABASE;
+        EXIT;
+        EOF
+        )
+          NOW=$(date +%s)
+          ELAPSED=$(( NOW - START_TIME ))
+          echo "$(date '+%H:%M:%S') [${ELAPSED}s] ${ROLE}"
+          if echo "$ROLE" | grep -q "PRIMARY.*READ WRITE"; then
+            echo "PROMOTED at ${ELAPSED}s"
+            exit 0
+          fi
+          if [ $ELAPSED -ge {{ max_wait_seconds }} ]; then
+            echo "TIMEOUT after ${ELAPSED}s — still not PRIMARY"
+            exit 1
+          fi
+          sleep 5
+        done
+      register: promote_wait
+      when: is_standby_alive | bool
+      failed_when: false
+
+    - name: "RESULT: Downtime summary"
+      debug:
+        msg: "{{ promote_wait.stdout_lines }}"
+      when: is_standby_alive | bool

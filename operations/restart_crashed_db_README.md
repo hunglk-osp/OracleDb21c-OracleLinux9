@@ -158,18 +158,26 @@ RFS        IDLE          126
 
 ## Lưu ý quan trọng
 
-⚠️ **Chạy playbook này TRƯỚC khi chạy lại `install_observer.yml`**
+Sau khi chạy xong, kiểm tra Observer còn sống và FSFO còn enabled không:
 
-Sau failover, thứ tự đúng:
 ```bash
-# 1. Khôi phục con crash thành Standby
-ansible-playbook operations/restart_crashed_db.yml
-
-# 2. Re-enable FSFO và restart Observer
-ansible-playbook install/install_observer.yml
+# Trên Observer (192.168.1.18)
+ps aux | grep dgmgrl
+dgmgrl sys/Oracle_4U@ORCL "SHOW CONFIGURATION;"
 ```
 
-Nếu chạy `install_observer.yml` khi DB chưa OPEN, Observer sẽ không connect được và FSFO không enable thành công.
+Nếu `Fast-Start Failover: ENABLED` và Observer process còn chạy → **không cần làm thêm gì**.
+
+Chỉ chạy lại `install_observer.yml` khi:
+- Observer process bị chết
+- FSFO bị `DISABLED`
+
+```bash
+# Thứ tự nếu cần chạy lại Observer
+# (DB phải OPEN trước — install_observer.yml sẽ lỗi nếu DB chưa OPEN)
+ansible-playbook operations/restart_crashed_db.yml
+ansible-playbook install/install_observer.yml
+```
 
 ---
 

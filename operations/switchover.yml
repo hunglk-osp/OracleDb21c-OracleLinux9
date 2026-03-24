@@ -1,0 +1,436 @@
+---
+# switchover.yml
+# Planned switchover Oracle Data Guard — đảo vai trò Primary ↔ Standby (không mất data)
+#
+# Quy trình:
+#   PHASE 1: Detect ai đang là PRIMARY / STANDBY
+#   PHASE 2: Disable FSFO + Stop Observer
+#   PHASE 3: Thực hiện SWITCHOVER
+#   PHASE 4: Verify kết quả sau switchover
+#   PHASE 5: Re-enable FSFO + Restart Observer
+#
+# Chạy: ansible-playbook operations/switchover.yml
+#
+# Yêu cầu:
+#   - Cả 2 DB đang OPEN và đồng bộ (SHOW CONFIGURATION = SUCCESS)
+#   - Observer đang chạy (FSFO enabled)
+#   - Apply lag gần 0 (kiểm tra trước khi chạy)
+
+# ═══════════════════════════════════════════════════════
+# PHASE 1: Detect PRIMARY / STANDBY
+# ═══════════════════════════════════════════════════════
+- name: "PHASE 1: Detect vai trò từng node"
+  hosts: primary,standby
+  become: yes
+  vars:
+    oracle_home: /u01/app/oracle/product/21c/dbhome_1
+    oracle_sid: ORCL
+    sys_password: "Oracle_4U"
+
+  tasks:
+    - name: "DETECT: Check DATABASE_ROLE"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF LINESIZE 200
+        SELECT TRIM(DATABASE_ROLE)||'|'||TRIM(OPEN_MODE)||'|'||TRIM(DB_UNIQUE_NAME) FROM V$DATABASE;
+        EXIT;
+        EOF
+      register: db_info
+      changed_when: false
+      failed_when: false
+
+    - name: "DETECT: Set role facts"
+      set_fact:
+        is_primary: "{{ 'PRIMARY' in db_info.stdout and 'READ WRITE' in db_info.stdout }}"
+        is_standby: "{{ 'PHYSICAL STANDBY' in db_info.stdout }}"
+        db_unique_name: "{{ db_info.stdout.split('|')[2] | default('UNKNOWN') | trim }}"
+
+    - name: "DETECT: Show current role"
+      debug:
+        msg: "{{ inventory_hostname }} ({{ ansible_host }}): {{ db_info.stdout | trim }}"
+
+    - name: "DETECT: Check apply lag (chỉ Standby)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+        SELECT VALUE FROM V$DATAGUARD_STATS WHERE NAME = 'apply lag';
+        EXIT;
+        EOF
+      register: apply_lag
+      changed_when: false
+      failed_when: false
+      when: is_standby | bool
+
+    - name: "DETECT: Show apply lag"
+      debug:
+        msg: "{{ inventory_hostname }}: Apply lag = {{ apply_lag.stdout | trim | default('N/A') }}"
+      when: is_standby | bool
+
+# ═══════════════════════════════════════════════════════
+# PHASE 2: Disable FSFO + Stop Observer (chỉ trên Primary)
+# ═══════════════════════════════════════════════════════
+- name: "PHASE 2: Disable FSFO trước switchover"
+  hosts: primary,standby
+  become: yes
+  vars:
+    oracle_home: /u01/app/oracle/product/21c/dbhome_1
+    oracle_sid: ORCL
+    sys_password: "Oracle_4U"
+
+  tasks:
+    - name: "FSFO: Disable Fast-Start Failover (chỉ Primary)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        dgmgrl sys/{{ sys_password }}@{{ db_unique_name }} << 'DGEOF'
+        DISABLE FAST_START FAILOVER FORCE;
+        EXIT;
+        DGEOF
+      register: fsfo_disable
+      failed_when: false
+      when: is_primary | bool
+
+    - name: "FSFO: Show disable result"
+      debug:
+        msg: "{{ fsfo_disable.stdout_lines }}"
+      when: is_primary | bool
+
+    - name: "FSFO: Stop Observer qua Broker (chỉ Primary)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        printf "STOP OBSERVER ALL;\nEXIT;\n" | \
+          dgmgrl sys/{{ sys_password }}@{{ db_unique_name }} 2>&1 || true
+      failed_when: false
+      when: is_primary | bool
+
+# Stop Observer process trên máy Observer (graceful — STOP OBSERVER qua broker đã gửi ở PHASE 2)
+- name: "PHASE 2b: Stop Observer process trên máy Observer"
+  hosts: observer
+  become: yes
+  vars:
+    observer_log_dir: /home/ubuntu/oracle-observer
+
+  tasks:
+    - name: "OBSERVER: Wait for broker STOP OBSERVER to take effect (10s)"
+      pause:
+        seconds: 10
+
+    - name: "OBSERVER: Stop run_observer loop (graceful)"
+      shell: |
+        # Chỉ stop wrapper loop — dgmgrl đã được broker stop ở PHASE 2
+        if [ -f {{ observer_log_dir }}/observer.pid ]; then
+          OLD_PID=$(cat {{ observer_log_dir }}/observer.pid)
+          kill $OLD_PID 2>/dev/null || true
+          sleep 3
+          rm -f {{ observer_log_dir }}/observer.pid
+        fi
+        REMAINING=$(ps -ef | grep -E 'dgmgrl|run_observer' | grep -v grep | wc -l)
+        echo "Observer processes remaining: $REMAINING"
+      failed_when: false
+
+# ═══════════════════════════════════════════════════════
+# PHASE 3: Thực hiện SWITCHOVER
+# ═══════════════════════════════════════════════════════
+- name: "PHASE 3: Thực hiện SWITCHOVER"
+  hosts: primary,standby
+  become: yes
+  vars:
+    oracle_home: /u01/app/oracle/product/21c/dbhome_1
+    oracle_sid: ORCL
+    sys_password: "Oracle_4U"
+
+  tasks:
+    - name: "SWITCHOVER: Kiểm tra CONFIGURATION sẵn sàng (chỉ Primary)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        dgmgrl sys/{{ sys_password }}@{{ db_unique_name }} << 'DGEOF'
+        SHOW CONFIGURATION;
+        DGEOF
+      register: config_check
+      changed_when: false
+      failed_when: false
+      when: is_primary | bool
+
+    - name: "SWITCHOVER: Show configuration trước khi switch"
+      debug:
+        msg: "{{ config_check.stdout_lines }}"
+      when: is_primary | bool
+
+    - name: "SWITCHOVER: Lấy Standby DB_UNIQUE_NAME (chỉ Standby)"
+      set_fact:
+        standby_db_name: "{{ db_unique_name }}"
+      when: is_standby | bool
+
+    - name: "SWITCHOVER: Thực hiện SWITCHOVER TO <standby> (chỉ Primary)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+
+        # Lấy Standby DB_UNIQUE_NAME từ broker config
+        STBY_NAME=$(dgmgrl sys/{{ sys_password }}@{{ db_unique_name }} 'SHOW CONFIGURATION' 2>/dev/null | \
+          grep -i 'physical standby' | awk '{print $1}' | head -1)
+
+        echo "Switching over to: ${STBY_NAME}"
+
+        dgmgrl sys/{{ sys_password }}@{{ db_unique_name }} << DGEOF
+        SWITCHOVER TO ${STBY_NAME};
+        EXIT;
+        DGEOF
+      register: switchover_result
+      failed_when: false
+      when: is_primary | bool
+
+    - name: "SWITCHOVER: Show result"
+      debug:
+        msg: "{{ switchover_result.stdout_lines }}"
+      when: is_primary | bool
+
+    - name: "SWITCHOVER: Wait for roles to stabilize (30s)"
+      pause:
+        seconds: 30
+
+# ═══════════════════════════════════════════════════════
+# PHASE 4: Verify kết quả sau switchover
+# ═══════════════════════════════════════════════════════
+- name: "PHASE 4: Verify trạng thái sau switchover"
+  hosts: primary,standby
+  become: yes
+  vars:
+    oracle_home: /u01/app/oracle/product/21c/dbhome_1
+    oracle_sid: ORCL
+    sys_password: "Oracle_4U"
+
+  tasks:
+    - name: "VERIFY: Check DB role + open mode sau switchover"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET LINESIZE 200 PAGESIZE 50
+        COL DATABASE_ROLE FORMAT A20
+        COL OPEN_MODE FORMAT A25
+        COL DB_UNIQUE_NAME FORMAT A15
+
+        PROMPT === DATABASE ===
+        SELECT DATABASE_ROLE, OPEN_MODE, DB_UNIQUE_NAME FROM V$DATABASE;
+
+        COL NAME FORMAT A15
+        COL OPEN_MODE FORMAT A15
+        PROMPT === PDB ===
+        SELECT NAME, OPEN_MODE FROM V$PDBS WHERE NAME != 'PDB$SEED';
+
+        COL PROCESS FORMAT A10
+        COL STATUS FORMAT A15
+        PROMPT === MRP/RFS ===
+        SELECT PROCESS, STATUS, SEQUENCE# FROM V$MANAGED_STANDBY
+        WHERE PROCESS IN ('MRP0','RFS') ORDER BY PROCESS;
+        EXIT;
+        EOF
+      register: post_switch_status
+      changed_when: false
+      failed_when: false
+
+    - name: "VERIFY: Show post-switchover status"
+      debug:
+        msg: "{{ post_switch_status.stdout_lines }}"
+
+    - name: "VERIFY: Set new role facts"
+      set_fact:
+        new_is_primary: "{{ 'PRIMARY' in post_switch_status.stdout and 'READ WRITE' in post_switch_status.stdout }}"
+        new_db_unique_name: "{{ post_switch_status.stdout | regex_search('(ORCL[_A-Z0-9]*)\\s*$', multiline=True) | default(db_unique_name) | trim }}"
+
+    - name: "VERIFY: Summary vai trò mới"
+      debug:
+        msg: >-
+          {{ inventory_hostname }} ({{ ansible_host }}):
+          {% if new_is_primary | bool %}
+          ✓ PRIMARY (READ WRITE) — đã trở thành Primary mới
+          {% else %}
+          ✓ PHYSICAL STANDBY — đã reinstate thành Standby
+          {% endif %}
+
+# ═══════════════════════════════════════════════════════
+# PHASE 5: Re-enable FSFO + Restart Observer
+# ═══════════════════════════════════════════════════════
+- name: "PHASE 5a: Enable FSFO trên Primary mới"
+  hosts: primary,standby
+  become: yes
+  vars:
+    oracle_home: /u01/app/oracle/product/21c/dbhome_1
+    oracle_sid: ORCL
+    sys_password: "Oracle_4U"
+    fsfo_threshold: 30
+    fsfo_lag_limit: 30
+
+  tasks:
+    - name: "FSFO: Re-check DB role (Primary mới)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+        SELECT TRIM(DATABASE_ROLE)||'|'||TRIM(DB_UNIQUE_NAME) FROM V$DATABASE;
+        EXIT;
+        EOF
+      register: role_recheck
+      changed_when: false
+      failed_when: false
+
+    - name: "FSFO: Set new primary fact"
+      set_fact:
+        is_new_primary: "{{ 'PRIMARY' in role_recheck.stdout }}"
+        new_db_name: "{{ role_recheck.stdout.split('|')[1] | default('UNKNOWN') | trim }}"
+
+    - name: "FSFO: Check Flashback trên Primary mới"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+        SELECT FLASHBACK_ON FROM V$DATABASE;
+        EXIT;
+        EOF
+      register: flash_check
+      changed_when: false
+      failed_when: false
+      when: is_new_primary | bool
+
+    - name: "FSFO: Enable Flashback trên Primary mới (chỉ khi chưa ON)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        ALTER DATABASE FLASHBACK ON;
+        EXIT;
+        EOF
+      failed_when: false
+      when:
+        - is_new_primary | bool
+        - "'YES' not in (flash_check.stdout | default(''))"
+
+    - name: "FSFO: Enable Fast-Start Failover (Primary mới)"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        dgmgrl sys/{{ sys_password }}@{{ new_db_name }} << 'DGEOF'
+        EDIT CONFIGURATION SET PROPERTY FastStartFailoverThreshold = {{ fsfo_threshold }};
+        EDIT CONFIGURATION SET PROPERTY FastStartFailoverLagLimit = {{ fsfo_lag_limit }};
+        EDIT CONFIGURATION SET PROPERTY FastStartFailoverAutoReinstate = TRUE;
+        EDIT CONFIGURATION SET PROPERTY FastStartFailoverPmyShutdown = FALSE;
+        ENABLE FAST_START FAILOVER;
+        DGEOF
+      register: fsfo_reenable
+      failed_when: false
+      when: is_new_primary | bool
+
+    - name: "FSFO: Show re-enable result"
+      debug:
+        msg: "{{ fsfo_reenable.stdout_lines }}"
+      when: is_new_primary | bool
+
+# Restart Observer trên máy Observer
+- name: "PHASE 5b: Restart Observer"
+  hosts: observer
+  become: yes
+  vars:
+    observer_log_dir: /home/ubuntu/oracle-observer
+
+  tasks:
+    - name: "OBSERVER: Start observer (auto-detect Primary mới)"
+      become_user: ubuntu
+      shell: |
+        {{ observer_log_dir }}/start_observer.sh 2>&1
+      register: observer_restart
+      failed_when: false
+
+    - name: "OBSERVER: Show restart result"
+      debug:
+        msg: "{{ observer_restart.stdout_lines }}"
+
+    - name: "OBSERVER: Wait for observer to connect (25s)"
+      pause:
+        seconds: 25
+
+    - name: "OBSERVER: Verify observer process"
+      shell: ps -ef | grep dgmgrl | grep -v grep || echo "(not running)"
+      register: obs_proc
+      changed_when: false
+
+    - name: "OBSERVER: Show observer process"
+      debug:
+        msg: "{{ obs_proc.stdout_lines }}"
+
+    - name: "OBSERVER: Show observer log"
+      shell: tail -20 {{ observer_log_dir }}/observer_dgmgrl.log 2>/dev/null || echo "(no log yet)"
+      register: obs_log
+      changed_when: false
+
+    - name: "OBSERVER: Display log"
+      debug:
+        msg: "{{ obs_log.stdout_lines }}"
+
+# Final verify FSFO
+- name: "PHASE 5c: Final verify FSFO + DG configuration"
+  hosts: primary,standby
+  become: yes
+  vars:
+    oracle_home: /u01/app/oracle/product/21c/dbhome_1
+    oracle_sid: ORCL
+    sys_password: "Oracle_4U"
+
+  tasks:
+    - name: "FINAL: Detect Primary cho final check"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        sqlplus -s / as sysdba << 'EOF'
+        SET PAGESIZE 0 FEEDBACK OFF VERIFY OFF HEADING OFF
+        SELECT TRIM(DATABASE_ROLE)||'|'||TRIM(DB_UNIQUE_NAME) FROM V$DATABASE;
+        EXIT;
+        EOF
+      register: final_role
+      changed_when: false
+      failed_when: false
+
+    - name: "FINAL: Set facts"
+      set_fact:
+        is_final_primary: "{{ 'PRIMARY' in final_role.stdout }}"
+        final_db_name: "{{ final_role.stdout.split('|')[1] | default('UNKNOWN') | trim }}"
+
+    - name: "FINAL: Show CONFIGURATION + FSFO"
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
+        dgmgrl sys/{{ sys_password }}@{{ final_db_name }} << 'DGEOF'
+        SHOW CONFIGURATION;
+        SHOW FAST_START FAILOVER;
+        DGEOF
+      register: final_config
+      changed_when: false
+      failed_when: false
+      when: is_final_primary | bool
+
+    - name: "FINAL: Display configuration"
+      debug:
+        msg: "{{ final_config.stdout_lines }}"
+      when: is_final_primary | bool
+
+    - name: "FINAL: Summary"
+      debug:
+        msg:
+          - "========================================="
+          - "SWITCHOVER — HOÀN TẤT"
+          - "========================================="
+          - "{{ inventory_hostname }} ({{ ansible_host }}): {{ final_role.stdout | trim }}"
+          - ""
+          - "Kiểm tra nhanh:"
+          - "  dgmgrl sys/Oracle_4U@ORCL 'SHOW CONFIGURATION;'"
+          - "  tail -20 /home/ubuntu/oracle-observer/observer_dgmgrl.log"
+          - "========================================="
+      when: is_final_primary | bool
