@@ -251,6 +251,8 @@ du -sh /u01/backup/rman/
     │           -e "restore_point=before_load_test"
     │
     └── KHÔNG → (5b) RMAN restore — chậm, ~30-60 phút
+                # Primary tự stream từ Standby qua network (FROM SERVICE)
+                # Không cần copy file .bkp sang Primary
                 ansible-playbook operations/recover_database.yml \
                   -e "mode=rman" \
                   -e "until_time='2026-03-24 10:00:00'"

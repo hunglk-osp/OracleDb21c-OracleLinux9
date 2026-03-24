@@ -31,6 +31,7 @@
     restore_point: ""         # mode=flashback: tên restore point
     until_time: ""            # mode=rman: thời điểm recover "YYYY-MM-DD HH24:MI:SS"
     backup_dir: /u01/backup/rman
+    standby_service: ORCL_STBY  # TNS alias để Primary kết nối Standby (FROM SERVICE)
 
   tasks:
 
@@ -234,7 +235,7 @@
       when: is_primary | bool and mode == 'rman'
       failed_when: false
 
-    - name: "RMAN: Restore + Recover Primary đến '{{ until_time }}'"
+    - name: "RMAN: Restore + Recover Primary đến '{{ until_time }}' (FROM SERVICE Standby)"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
@@ -242,7 +243,7 @@
         STARTUP MOUNT;
         RUN {
           SET UNTIL TIME "TO_DATE('{{ until_time }}', 'YYYY-MM-DD HH24:MI:SS')";
-          RESTORE DATABASE;
+          RESTORE DATABASE FROM SERVICE {{ standby_service }};
           RECOVER DATABASE;
         }
         ALTER DATABASE OPEN RESETLOGS;

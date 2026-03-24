@@ -156,18 +156,24 @@ ALTER DATABASE RECOVER MANAGED STANDBY DATABASE USING CURRENT LOGFILE DISCONNECT
 
 **4a — Stop MRP trên Standby**
 
-**4b — RMAN restore Primary**
+**4b — RMAN restore Primary FROM SERVICE Standby**
+
+Không cần copy file backup sang Primary. RMAN stream trực tiếp từ Standby qua network (Oracle 12c+):
 
 ```bash
 rman target /
 STARTUP MOUNT;
 RUN {
   SET UNTIL TIME "TO_DATE('2026-03-24 10:00:00', 'YYYY-MM-DD HH24:MI:SS')";
-  RESTORE DATABASE;
+  RESTORE DATABASE FROM SERVICE ORCL_STBY;
   RECOVER DATABASE;
 }
 ALTER DATABASE OPEN RESETLOGS;
 ```
+
+📌 `FROM SERVICE ORCL_STBY` — Primary kết nối vào Standby qua TNS alias, RMAN tạo backup sets trên Standby rồi stream về Primary. File backup `.bkp` **không được copy** sang Primary — Primary restore trực tiếp từ datafiles của Standby.
+
+📌 Verify sau restore: không dùng `ls /u01/backup/rman/` trên Primary (không có file gì) — dùng query SQL hoặc xem RMAN output để confirm.
 
 ⚠️ **RMAN restore + RESETLOGS làm Standby mất sync** — Standby không thể tự resync lại sau khi Primary mở với RESETLOGS mới. Cần chạy thêm:
 
