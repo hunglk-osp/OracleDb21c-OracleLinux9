@@ -98,7 +98,7 @@
         msg: "{{ restore_points.stdout_lines }}"
       when: is_primary | bool and mode == 'list'
 
-    - name: "LIST: RMAN backups hiện có (chỉ Primary)"
+    - name: "LIST: RMAN backups trên Standby (chỉ Standby)"
       become_user: oracle
       shell: |
         export ORACLE_HOME={{ oracle_home }} ORACLE_SID={{ oracle_sid }} PATH={{ oracle_home }}/bin:$PATH
@@ -109,12 +109,12 @@
       register: rman_list
       changed_when: false
       failed_when: false
-      when: is_primary | bool and mode == 'list'
+      when: is_standby | bool and mode == 'list'
 
-    - name: "LIST: Show RMAN backups"
+    - name: "LIST: Show RMAN backups (từ Standby)"
       debug:
         msg: "{{ rman_list.stdout_lines }}"
-      when: is_primary | bool and mode == 'list'
+      when: is_standby | bool and mode == 'list'
 
     # ════════════════════════════════════════
     # PHASE 3: FLASHBACK DATABASE
